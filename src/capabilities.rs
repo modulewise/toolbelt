@@ -38,7 +38,7 @@ fn default_exposed() -> bool {
     false
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerConfig {
     #[serde(default)]
     pub capabilities: HashMap<String, CapabilityDefinition>,
@@ -46,8 +46,8 @@ pub struct ServerConfig {
 
 #[derive(Debug, Clone)]
 pub enum CapabilityImplementation {
-    Wasmtime(WasmtimeFeature),    // Current: handled in linker/WASI context
-    Component(ComponentSpec),     // Future: loaded and composed
+    Wasmtime(WasmtimeFeature), // Current: handled in linker/WASI context
+    Component(ComponentSpec),  // Future: loaded and composed
 }
 
 #[derive(Debug, Clone)]
@@ -139,13 +139,5 @@ impl CapabilityRegistry {
 impl Default for CapabilityRegistry {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            capabilities: HashMap::new(),
-        }
     }
 }

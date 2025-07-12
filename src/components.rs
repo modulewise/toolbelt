@@ -1,5 +1,6 @@
 use crate::capabilities::CapabilityRegistry;
 use anyhow::Result;
+use std::collections::HashMap;
 use wasmtime::{
     Cache, Config, Engine, Store,
     component::{Component, Linker, Type, Val},
@@ -17,6 +18,7 @@ pub struct ComponentSpec {
     pub name: String,
     pub bytes: Vec<u8>,
     pub capabilities: Vec<Capability>,
+    pub config: HashMap<String, serde_json::Value>,
 }
 
 pub struct ComponentState {
@@ -72,15 +74,10 @@ impl Invoker {
         // Only process wasmtime capabilities for linker setup
         for capability_name in capabilities {
             if let Some(definition) = capability_registry.get_capability(capability_name) {
-                if let Some(wasmtime_feature) = definition.uri.strip_prefix("wasmtime:") {
-                    match wasmtime_feature {
-                        "http" => {
-                            wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
-                        }
-                        // Other wasmtime features like inherit-network are handled in WASI context
-                        _ => {}
-                    }
+                if let Some("http") = definition.uri.strip_prefix("wasmtime:") {
+                    wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
                 }
+                // Other wasmtime features like inherit-network are handled in WASI context
                 // Skip component capabilities - they're handled during composition
             }
         }
@@ -100,6 +97,8 @@ impl Invoker {
         function: String,
         args: Vec<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        let component_bytes = bytes.to_vec();
+
         let version_delim = if version.is_empty() { "" } else { "@" };
         let interface = format!("{namespace}:{package}/{interface}{version_delim}{version}");
         let linker = self.create_linker(capabilities, capability_registry)?;
@@ -132,7 +131,7 @@ impl Invoker {
             capability_registry
                 .get_capability(capability_name)
                 .and_then(|def| def.uri.strip_prefix("wasmtime:"))
-                .map_or(false, |feature| feature == "http")
+                == Some("http")
         });
 
         let wasi_http_ctx = if needs_http {
@@ -146,7 +145,7 @@ impl Invoker {
             resource_table: ResourceTable::new(),
         };
         let mut store = Store::new(&self.engine, state);
-        let component = Component::from_binary(&self.engine, bytes)?;
+        let component = Component::from_binary(&self.engine, &component_bytes)?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
         let interface_export = instance

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod capabilities;
 mod components;
+mod composer;
 mod resolver;
 mod server;
 
@@ -46,7 +47,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
-    // Load capability registry from server config (if provided)
     let capability_registry = if let Some(server_config_path) = &cli.server_config {
         CapabilityRegistry::from_config_file(server_config_path)?
     } else {
