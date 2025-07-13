@@ -10,14 +10,8 @@ impl Composer {
         tool_bytes: &[u8],
         config: &HashMap<String, serde_json::Value>,
     ) -> Result<Vec<u8>> {
-        // Note: config can be empty - this creates an empty config component
-        // that satisfies wasi:config/store imports but provides no values (uses defaults)
-
+        // Note: empty config will create an empty wasi:config/store component
         let config_component_bytes = create_config_component(config)?;
-        // println!(
-        //     "Generated config component: {} bytes",
-        //     config_component_bytes.len()
-        // );
 
         let mut graph = CompositionGraph::new();
 
@@ -40,7 +34,6 @@ impl Composer {
             .encode(encode_options)
             .map_err(|e| anyhow::anyhow!("Failed to encode composition: {}", e))?;
 
-        //println!("Composition: {} bytes", composed_bytes.len());
         Ok(composed_bytes)
     }
 }
