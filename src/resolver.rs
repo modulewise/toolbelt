@@ -78,9 +78,8 @@ fn resolve_toml_file(path: &PathBuf) -> Result<Vec<ComponentSpec>> {
         let component_path = resolve_uri(&component_config.uri)?;
         let mut bytes = fs::read(&component_path)?;
         let config = configs.get(&name).cloned().unwrap_or_default();
-        //println!("Tool '{name}' has config: {config:?}");
 
-        // Compose if config exists (even if empty) - empty config satisfies imports with defaults
+        // Compose if config exists, even if empty (satisfies imports with defaults)
         if configs.contains_key(&name) {
             println!(
                 "Composing {} with config: {:?}",
@@ -89,7 +88,6 @@ fn resolve_toml_file(path: &PathBuf) -> Result<Vec<ComponentSpec>> {
             );
             bytes = Composer::compose_tool_with_config(&bytes, &config)
                 .map_err(|e| anyhow::anyhow!("Failed to compose {} with config: {}", name, e))?;
-            //println!("✓ Composed {name} successfully");
         }
 
         specs.push(ComponentSpec {
