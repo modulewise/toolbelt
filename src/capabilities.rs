@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -17,8 +17,8 @@ pub struct CapabilityRegistry {
 pub struct CapabilityDefinition {
     /// URI indicating the capability implementation
     /// - "wasmtime:feature-name" for built-in wasmtime features
-    /// - Future: "file://path" or "oci://registry" for Wasm components
-    /// - Future: other schemes for host functions
+    /// - Future: "file://path" or "oci://registry/artifact" for components
+    /// - Future: possibly other schemes for host functions
     pub uri: String,
 
     /// Whether tools can directly request this capability
@@ -73,7 +73,6 @@ impl CapabilityRegistry {
         let registry = Self {
             capabilities: config.capabilities,
         };
-        registry.validate_no_cycles()?;
         Ok(registry)
     }
 
@@ -94,45 +93,6 @@ impl CapabilityRegistry {
         requested
             .iter()
             .all(|capability| self.is_exposed(capability))
-    }
-
-    fn validate_no_cycles(&self) -> Result<()> {
-        let mut visited = HashSet::new();
-        let mut visiting = HashSet::new();
-        for capability_name in self.capabilities.keys() {
-            if !visited.contains(capability_name) {
-                self.check_cycles_recursive(capability_name, &mut visited, &mut visiting)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn check_cycles_recursive(
-        &self,
-        capability: &str,
-        visited: &mut HashSet<String>,
-        visiting: &mut HashSet<String>,
-    ) -> Result<()> {
-        if visited.contains(capability) {
-            return Ok(());
-        }
-
-        if visiting.contains(capability) {
-            return Err(anyhow::anyhow!(
-                "Circular dependency detected involving capability: {}",
-                capability
-            ));
-        }
-
-        if let Some(definition) = self.get_capability(capability) {
-            visiting.insert(capability.to_string());
-            for dep in &definition.capabilities {
-                self.check_cycles_recursive(dep, visited, visiting)?;
-            }
-            visiting.remove(capability);
-        }
-        visited.insert(capability.to_string());
-        Ok(())
     }
 }
 

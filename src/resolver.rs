@@ -64,7 +64,6 @@ fn resolve_wasm_file(path: &PathBuf) -> Result<ComponentSpec> {
         name,
         bytes,
         capabilities: Vec::new(),
-        config: HashMap::new(),
     })
 }
 
@@ -97,7 +96,6 @@ fn resolve_toml_file(path: &PathBuf) -> Result<Vec<ComponentSpec>> {
             name,
             bytes,
             capabilities: component_config.capabilities,
-            config,
         });
     }
     Ok(specs)

@@ -1,6 +1,5 @@
 use crate::capabilities::CapabilityRegistry;
 use anyhow::Result;
-use std::collections::HashMap;
 use wasmtime::{
     Cache, Config, Engine, Store,
     component::{Component, Linker, Type, Val},
@@ -18,7 +17,6 @@ pub struct ComponentSpec {
     pub name: String,
     pub bytes: Vec<u8>,
     pub capabilities: Vec<Capability>,
-    pub config: HashMap<String, serde_json::Value>,
 }
 
 pub struct ComponentState {
