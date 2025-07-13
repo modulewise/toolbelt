@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 
 mod interfaces;
 
+use crate::capabilities::CapabilityRegistry;
 use crate::components::{ComponentSpec, Invoker};
 use interfaces::{ComponentTool, Parser};
 
@@ -19,17 +20,33 @@ use interfaces::{ComponentTool, Parser};
 pub struct ComponentServer {
     tools: Vec<(ComponentTool, ComponentSpec)>,
     invoker: Invoker,
+    capability_registry: CapabilityRegistry,
 }
 
 impl ComponentServer {
-    pub fn new(component_specs: Vec<ComponentSpec>) -> Result<Self> {
+    pub fn new(
+        component_specs: Vec<ComponentSpec>,
+        capability_registry: CapabilityRegistry,
+    ) -> Result<Self> {
         let mut tools = Vec::new();
         for spec in component_specs {
+            if !capability_registry.check_availability(&spec.capabilities) {
+                eprintln!(
+                    "Skipped component '{}', requested unavailable capabilities: {:?}",
+                    spec.name, spec.capabilities
+                );
+                continue;
+            }
+
             match Parser::parse(&spec.bytes, &spec.name) {
                 Ok(component_tools) => {
                     for tool in component_tools {
                         tools.push((tool, spec.clone()));
                     }
+                    println!(
+                        "Loaded component '{}' with capabilities: {:?}",
+                        spec.name, spec.capabilities
+                    );
                 }
                 Err(e) => {
                     eprintln!("Failed to parse component {}: {}", spec.name, e);
@@ -37,7 +54,11 @@ impl ComponentServer {
             }
         }
         let invoker = Invoker::new()?;
-        Ok(Self { tools, invoker })
+        Ok(Self {
+            tools,
+            invoker,
+            capability_registry,
+        })
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
@@ -80,6 +101,7 @@ impl ComponentServer {
             .invoke(
                 &tool.bytes,
                 &spec.capabilities,
+                &self.capability_registry,
                 tool.namespace.clone(),
                 tool.package.clone(),
                 tool.version.clone(),

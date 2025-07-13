@@ -1,3 +1,4 @@
+use crate::capabilities::CapabilityRegistry;
 use anyhow::Result;
 use wasmtime::{
     Cache, Config, Engine, Store,
@@ -9,13 +10,7 @@ use wasmtime_wasi::{
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Capability {
-    Http,
-    InheritNetwork,
-    AllowIpNameLookup,
-}
+pub use crate::capabilities::Capability;
 
 #[derive(Debug, Clone)]
 pub struct ComponentSpec {
@@ -66,11 +61,23 @@ impl Invoker {
         Ok(Self { engine })
     }
 
-    fn create_linker(&self, capabilities: &[Capability]) -> Result<Linker<ComponentState>> {
+    fn create_linker(
+        &self,
+        capabilities: &[Capability],
+        capability_registry: &CapabilityRegistry,
+    ) -> Result<Linker<ComponentState>> {
         let mut linker = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-        if capabilities.contains(&Capability::Http) {
-            wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+
+        // Only process wasmtime capabilities for linker setup
+        for capability_name in capabilities {
+            if let Some(definition) = capability_registry.get_capability(capability_name) {
+                if let Some("http") = definition.uri.strip_prefix("wasmtime:") {
+                    wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                }
+                // Other wasmtime features like inherit-network are handled in WASI context
+                // Skip component capabilities - they're handled during composition
+            }
         }
         Ok(linker)
     }
@@ -79,6 +86,7 @@ impl Invoker {
         &self,
         bytes: &[u8],
         capabilities: &[Capability],
+        capability_registry: &CapabilityRegistry,
         namespace: String,
         package: String,
         version: String,
@@ -86,27 +94,44 @@ impl Invoker {
         function: String,
         args: Vec<serde_json::Value>,
     ) -> Result<serde_json::Value> {
+        let component_bytes = bytes.to_vec();
+
         let version_delim = if version.is_empty() { "" } else { "@" };
         let interface = format!("{namespace}:{package}/{interface}{version_delim}{version}");
-        let linker = self.create_linker(capabilities)?;
+        let linker = self.create_linker(capabilities, capability_registry)?;
         let mut wasi_builder = WasiCtxBuilder::new();
 
-        for capability in capabilities {
-            match capability {
-                Capability::InheritNetwork => {
-                    wasi_builder.inherit_network();
-                }
-                Capability::AllowIpNameLookup => {
-                    wasi_builder.allow_ip_name_lookup(true);
-                }
-                Capability::Http => {
-                    // HTTP capability only adds linker functions, no WASI context changes
+        // Process wasmtime capabilities for WASI context
+        for capability_name in capabilities {
+            if let Some(definition) = capability_registry.get_capability(capability_name) {
+                if let Some(wasmtime_feature) = definition.uri.strip_prefix("wasmtime:") {
+                    match wasmtime_feature {
+                        "inherit-network" => {
+                            wasi_builder.inherit_network();
+                        }
+                        "allow-ip-name-lookup" => {
+                            wasi_builder.allow_ip_name_lookup(true);
+                        }
+                        "http" => {
+                            // HTTP capability only adds linker functions, no WASI context changes
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
         let wasi = wasi_builder.build();
-        let wasi_http_ctx = if capabilities.contains(&Capability::Http) {
+
+        // Check if any capability requires HTTP context
+        let needs_http = capabilities.iter().any(|capability_name| {
+            capability_registry
+                .get_capability(capability_name)
+                .and_then(|def| def.uri.strip_prefix("wasmtime:"))
+                == Some("http")
+        });
+
+        let wasi_http_ctx = if needs_http {
             Some(WasiHttpCtx::new())
         } else {
             None
@@ -117,7 +142,7 @@ impl Invoker {
             resource_table: ResourceTable::new(),
         };
         let mut store = Store::new(&self.engine, state);
-        let component = Component::from_binary(&self.engine, bytes)?;
+        let component = Component::from_binary(&self.engine, &component_bytes)?;
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
         let interface_export = instance

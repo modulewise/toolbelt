@@ -3,10 +3,13 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+mod capabilities;
 mod components;
+mod composer;
 mod resolver;
 mod server;
 
+use capabilities::CapabilityRegistry;
 use resolver::resolve_components;
 use server::ComponentServer;
 
@@ -28,6 +31,14 @@ struct Cli {
         help = "Wasm component paths, TOML config files, or directories"
     )]
     components: Vec<PathBuf>,
+
+    /// Optional server configuration file
+    #[arg(
+        short = 's',
+        long = "server-config",
+        help = "Server configuration file (.toml)"
+    )]
+    server_config: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -35,8 +46,15 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
+
+    let capability_registry = if let Some(server_config_path) = &cli.server_config {
+        CapabilityRegistry::from_config_file(server_config_path)?
+    } else {
+        CapabilityRegistry::new() // Empty registry - no capabilities available
+    };
+
     let component_specs = resolve_components(&cli.components)?;
-    let server = ComponentServer::new(component_specs)?;
+    let server = ComponentServer::new(component_specs, capability_registry)?;
     server.run(addr).await?;
     Ok(())
 }
