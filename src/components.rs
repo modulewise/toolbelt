@@ -81,7 +81,6 @@ impl Invoker {
                 // Skip component capabilities - they're handled during composition
             }
         }
-
         Ok(linker)
     }
 
