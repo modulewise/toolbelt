@@ -46,15 +46,12 @@ impl Composer {
 }
 
 /// Generate a wasi:config/store component from key/value configuration
-/// Empty config creates an empty component that satisfies imports but provides no values
 fn create_config_component(config: &HashMap<String, serde_json::Value>) -> Result<Vec<u8>> {
-    // static-config expects Vec of tuples (empty Vec for no config values)
     let mut config_properties = Vec::new();
     for (key, value) in config {
         let string_value = convert_json_value_to_string(value)?;
         config_properties.push((key.clone(), string_value));
     }
-
     static_config::create_component(config_properties)
         .map_err(|e| anyhow::anyhow!("Failed to create config component: {}", e))
 }
