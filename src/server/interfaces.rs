@@ -381,6 +381,25 @@ impl Parser {
         function_counts.values().any(|&count| count > 1)
     }
 
+    fn is_optional_type(wit_type: Type, resolve: &Resolve) -> bool {
+        match wit_type {
+            Type::Id(type_id) => {
+                let type_def = resolve
+                    .types
+                    .get(type_id)
+                    .expect("Type definition not found for type ID");
+                match &type_def.kind {
+                    wit_parser::TypeDefKind::Option(_) => true,
+                    wit_parser::TypeDefKind::Type(inner_type) => {
+                        Self::is_optional_type(*inner_type, resolve)
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn function_to_component_tool(
         func: ComponentFunction,
         bytes: &[u8],
@@ -421,7 +440,9 @@ impl Parser {
                 );
             }
             properties.insert(param.name.clone(), param_schema);
-            required.push(param.name.clone());
+            if !Self::is_optional_type(param.wit_type, resolve) {
+                required.push(param.name.clone());
+            }
         }
 
         let input_schema = json!({
