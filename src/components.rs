@@ -328,14 +328,23 @@ fn json_to_val(json_value: &serde_json::Value, val_type: &Type) -> Result<Val> {
             for field in record_type.fields() {
                 let field_name = field.name.to_string();
                 let field_type = &field.ty;
+
                 if let Some(json_value) = obj.get(&field_name) {
                     let field_val = json_to_val(json_value, field_type)?;
                     fields.push((field_name, field_val));
                 } else {
-                    return Err(anyhow::anyhow!(
-                        "Missing required field '{}' in record",
-                        field_name
-                    ));
+                    // Check if field is optional
+                    match field_type {
+                        wasmtime::component::Type::Option(_) => {
+                            fields.push((field_name, Val::Option(None)));
+                        }
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "Missing required field '{}' in record",
+                                field_name
+                            ));
+                        }
+                    }
                 }
             }
 
