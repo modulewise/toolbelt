@@ -6,7 +6,8 @@ use rmcp::{
         PaginatedRequestParam, ServerCapabilities, ServerInfo,
     },
     service::{RequestContext, RoleServer},
-    transport::sse_server::SseServer,
+    transport::StreamableHttpService,
+    transport::streamable_http_server::session::local::LocalSessionManager,
 };
 use std::net::SocketAddr;
 
@@ -63,12 +64,29 @@ impl ComponentServer {
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
         println!("🔧 Modulewise Toolbelt MCP Server");
-        println!("📡 SSE endpoint: http://{addr}/sse");
-        let cancellation_token = SseServer::serve(addr)
-            .await?
-            .with_service(move || self.clone());
-        tokio::signal::ctrl_c().await?;
-        cancellation_token.cancel();
+
+        let service = StreamableHttpService::new(
+            move || Ok(self.clone()),
+            LocalSessionManager::default().into(),
+            Default::default(),
+        );
+
+        let router = axum::Router::new().nest_service("/mcp", service);
+        let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
+
+        println!("📡 Streamable HTTP endpoint: http://{addr}/mcp");
+
+        tokio::select! {
+            result = axum::serve(tcp_listener, router) => {
+                if let Err(err) = result {
+                    eprintln!("Server error: {}", err);
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received Ctrl+C, shutting down...");
+            }
+        }
+
         Ok(())
     }
 
