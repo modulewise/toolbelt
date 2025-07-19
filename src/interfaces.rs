@@ -67,6 +67,96 @@ impl Parser {
         Ok(component_tools)
     }
 
+    /// Discover interface exports from a component
+    /// Returns a list of full interface names (e.g., "wasi:keyvalue/store@0.2.0")
+    pub fn discover_exports(component_bytes: &[u8]) -> Result<Vec<String>> {
+        let decoded = wit_parser::decoding::decode(component_bytes)?;
+        let resolve = decoded.resolve().clone();
+
+        if resolve.worlds.len() != 1 {
+            return Err(anyhow::anyhow!("Expected exactly one world in component"));
+        }
+
+        let mut exports = Vec::new();
+        let (_, world) = resolve.worlds.iter().next().unwrap();
+
+        for (_, item) in &world.exports {
+            if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
+                let interface = resolve.interfaces.get(*id).unwrap();
+                if let Some(interface_name) = &interface.name {
+                    if let Some(package_id) = &interface.package {
+                        let package = resolve.packages.get(*package_id).unwrap();
+                        let package_name = &package.name;
+                        let version_suffix = package_name
+                            .version
+                            .as_ref()
+                            .map(|v| format!("@{v}"))
+                            .unwrap_or_default();
+                        let full_interface_name = format!(
+                            "{}:{}/{}{}",
+                            package_name.namespace,
+                            package_name.name,
+                            interface_name,
+                            version_suffix
+                        );
+                        exports.push(full_interface_name);
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Interface '{}' missing required package metadata",
+                            interface_name
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(exports)
+    }
+
+    /// Discover interface imports from a component
+    /// Returns a list of full interface names (e.g., "wasi:http/outgoing-handler@0.2.0")
+    pub fn discover_imports(component_bytes: &[u8]) -> Result<Vec<String>> {
+        let decoded = wit_parser::decoding::decode(component_bytes)?;
+        let resolve = decoded.resolve().clone();
+
+        if resolve.worlds.len() != 1 {
+            return Err(anyhow::anyhow!("Expected exactly one world in component"));
+        }
+
+        let mut imports = Vec::new();
+        let (_, world) = resolve.worlds.iter().next().unwrap();
+
+        for (_, item) in &world.imports {
+            if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
+                let interface = resolve.interfaces.get(*id).unwrap();
+                if let Some(interface_name) = &interface.name {
+                    if let Some(package_id) = &interface.package {
+                        let package = resolve.packages.get(*package_id).unwrap();
+                        let package_name = &package.name;
+                        let version_suffix = package_name
+                            .version
+                            .as_ref()
+                            .map(|v| format!("@{v}"))
+                            .unwrap_or_default();
+                        let full_interface_name = format!(
+                            "{}:{}/{}{}",
+                            package_name.namespace,
+                            package_name.name,
+                            interface_name,
+                            version_suffix
+                        );
+                        imports.push(full_interface_name);
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Interface '{}' missing required package metadata",
+                            interface_name
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(imports)
+    }
+
     fn parse_interface(
         interface_id: &wit_parser::InterfaceId,
         resolve: &Resolve,

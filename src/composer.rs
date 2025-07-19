@@ -12,18 +12,21 @@ impl Composer {
     ) -> Result<Vec<u8>> {
         // Note: empty config will create an empty wasi:config/store component
         let config_component_bytes = create_config_component(config)?;
+        Self::compose_components(tool_bytes, &config_component_bytes)
+    }
 
+    /// Compose two components: plug_bytes gets plugged into socket_bytes
+    pub fn compose_components(socket_bytes: &[u8], plug_bytes: &[u8]) -> Result<Vec<u8>> {
         let mut graph = CompositionGraph::new();
 
-        let tool_package = Package::from_bytes("tool", None, tool_bytes, graph.types_mut())?;
-        let config_package =
-            Package::from_bytes("config", None, config_component_bytes, graph.types_mut())?;
+        let socket_package = Package::from_bytes("socket", None, socket_bytes, graph.types_mut())?;
+        let plug_package = Package::from_bytes("plug", None, plug_bytes, graph.types_mut())?;
 
-        let tool_package_id = graph.register_package(tool_package)?;
-        let config_package_id = graph.register_package(config_package)?;
+        let socket_package_id = graph.register_package(socket_package)?;
+        let plug_package_id = graph.register_package(plug_package)?;
 
-        // compose config component (plug) into tool component (socket)
-        wac_graph::plug(&mut graph, vec![config_package_id], tool_package_id)?;
+        // compose plug component into socket component
+        wac_graph::plug(&mut graph, vec![plug_package_id], socket_package_id)?;
 
         let encode_options = EncodeOptions {
             define_components: true,

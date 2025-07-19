@@ -1,24 +1,28 @@
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 
-use crate::components::ComponentSpec;
+use crate::components::ComponentCapability;
 
-pub type Capability = String;
+pub type CapabilityName = String;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeCapability {
+    pub uri: String,
+    pub exposed: bool,
+    pub interfaces: Vec<String>, // WASI interfaces this capability provides
+}
+
+#[derive(Debug, Clone)]
 pub struct CapabilityRegistry {
-    pub capabilities: HashMap<String, CapabilityDefinition>,
+    pub runtime_capabilities: HashMap<String, RuntimeCapability>,
+    pub component_capabilities: HashMap<String, ComponentCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CapabilityDefinition {
+pub struct Capability {
     /// URI indicating the capability implementation
-    /// - "wasmtime:feature-name" for built-in wasmtime features
-    /// - Future: "file://path" or "oci://registry/artifact" for components
-    /// - Future: possibly other schemes for host functions
+    /// - "wasmtime:capability-name" for runtime capabilities
+    /// - Component URIs for component-based capabilities
     pub uri: String,
 
     /// Whether tools can directly request this capability
@@ -28,7 +32,12 @@ pub struct CapabilityDefinition {
 
     /// Capabilities that this capability depends on
     #[serde(default)]
-    pub capabilities: Vec<Capability>,
+    pub capabilities: Vec<CapabilityName>,
+
+    /// Configuration for this capability (if it's a component)
+    /// Maps to [capabilities.name.config] in TOML
+    #[serde(default)]
+    pub config: HashMap<String, serde_json::Value>,
 
     #[serde(default)]
     pub description: Option<String>,
@@ -41,63 +50,54 @@ fn default_exposed() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerConfig {
     #[serde(default)]
-    pub capabilities: HashMap<String, CapabilityDefinition>,
-}
-
-#[derive(Debug, Clone)]
-pub enum CapabilityImplementation {
-    Wasmtime(WasmtimeFeature), // Current: handled in linker/WASI context
-    Component(ComponentSpec),  // Future: loaded and composed
-}
-
-#[derive(Debug, Clone)]
-pub struct WasmtimeFeature {
-    pub feature: String,
+    pub capabilities: HashMap<String, Capability>,
 }
 
 impl CapabilityRegistry {
-    /// Create a new registry with no capabilities available by default
-    pub fn new() -> Self {
+    /// Create a new registry from resolved capability maps
+    pub fn new(
+        runtime_capabilities: HashMap<String, RuntimeCapability>,
+        component_capabilities: HashMap<String, ComponentCapability>,
+    ) -> Self {
         Self {
-            capabilities: HashMap::new(),
+            runtime_capabilities,
+            component_capabilities,
         }
     }
 
-    pub fn from_config_file<P: AsRef<Path>>(config_path: P) -> Result<Self> {
-        let content = fs::read_to_string(config_path)?;
-        let server_config: ServerConfig = toml::from_str(&content)?;
-        Self::from_server_config(server_config)
+    /// Create an empty registry with no capabilities
+    pub fn empty() -> Self {
+        Self {
+            runtime_capabilities: HashMap::new(),
+            component_capabilities: HashMap::new(),
+        }
     }
 
-    pub fn from_server_config(config: ServerConfig) -> Result<Self> {
-        let registry = Self {
-            capabilities: config.capabilities,
-        };
-        Ok(registry)
+    pub fn get_runtime_capability(&self, name: &str) -> Option<&RuntimeCapability> {
+        self.runtime_capabilities.get(name)
     }
 
-    /// Check if a capability is exposed to tools
-    pub fn is_exposed(&self, name: &str) -> bool {
-        self.capabilities
+    /// Get runtime capability only if it's exposed to tools
+    pub fn get_exposed_runtime_capability(&self, name: &str) -> Option<&RuntimeCapability> {
+        self.runtime_capabilities
             .get(name)
-            .map(|def| def.exposed)
-            .unwrap_or(false)
+            .filter(|cap| cap.exposed)
     }
 
-    pub fn get_capability(&self, name: &str) -> Option<&CapabilityDefinition> {
-        self.capabilities.get(name)
+    pub fn get_component_capability(&self, name: &str) -> Option<&ComponentCapability> {
+        self.component_capabilities.get(name)
     }
 
-    /// Check if all capabilities are available to tools
-    pub fn check_availability(&self, requested: &[Capability]) -> bool {
-        requested
-            .iter()
-            .all(|capability| self.is_exposed(capability))
+    /// Get component capability only if it's exposed to tools
+    pub fn get_exposed_component_capability(&self, name: &str) -> Option<&ComponentCapability> {
+        self.component_capabilities
+            .get(name)
+            .filter(|cap| cap.exposed)
     }
 }
 
 impl Default for CapabilityRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::empty()
     }
 }
