@@ -270,15 +270,15 @@ fn validate_imports(
     let component_imports = Parser::discover_imports(component_bytes)
         .map_err(|e| anyhow::anyhow!("Failed to discover component imports: {}", e))?;
 
-    let allowed_interfaces = get_allowed_interfaces_from_capabilities(
+    let expected_interfaces = get_expected_interfaces_from_capabilities(
         requested_capabilities,
         capability_registry,
         is_tool,
     );
 
-    // Validate: all component imports are covered by allowed interfaces
+    // Check that all component imports are covered by expected interfaces
     for import in &component_imports {
-        if !allowed_interfaces.contains(import) {
+        if !expected_interfaces.contains(import) {
             return Err(anyhow::anyhow!(
                 "Component imports unauthorized interface '{}' - must request appropriate capability",
                 import
@@ -288,14 +288,17 @@ fn validate_imports(
     Ok(())
 }
 
-fn get_allowed_interfaces_from_capabilities(
+fn get_expected_interfaces_from_capabilities(
     capabilities: &[CapabilityName],
     capability_registry: &CapabilityRegistry,
     is_tool: bool,
 ) -> std::collections::HashSet<String> {
     let mut interfaces = std::collections::HashSet::new();
     for capability_name in capabilities {
-        // Add interfaces from runtime capabilities
+        // Use get_runtime_capability even for is_tool (not get_exposed_runtime_capability) because:
+        // 1. The tool definition was already checked against exposed runtime capabilities
+        // 2. Here we are gathering all runtime capabilities expected by composed components
+        // 3. The wasmtime linker needs to know those capabilities when instantiating the component
         if let Some(runtime_capability) =
             capability_registry.get_runtime_capability(capability_name)
         {
