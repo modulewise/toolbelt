@@ -10,13 +10,20 @@ use wasmtime_wasi::{
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-pub use crate::capabilities::Capability;
+pub use crate::capabilities::CapabilityName;
 
 #[derive(Debug, Clone)]
 pub struct ComponentSpec {
     pub name: String,
     pub bytes: Vec<u8>,
-    pub capabilities: Vec<Capability>,
+    pub runtime_capabilities: Vec<CapabilityName>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ComponentCapability {
+    pub component: ComponentSpec,
+    pub exposed: bool,
+    pub exports: Vec<String>, // Interfaces this component capability provides
 }
 
 pub struct ComponentState {
@@ -63,21 +70,40 @@ impl Invoker {
 
     fn create_linker(
         &self,
-        capabilities: &[Capability],
+        capabilities: &[CapabilityName],
         capability_registry: &CapabilityRegistry,
     ) -> Result<Linker<ComponentState>> {
         let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
-        // Only process wasmtime capabilities for linker setup
+        // Add WASI interfaces based on explicitly requested capabilities
         for capability_name in capabilities {
-            if let Some(definition) = capability_registry.get_capability(capability_name) {
-                if let Some("http") = definition.uri.strip_prefix("wasmtime:") {
-                    wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+            if let Some(runtime_capability) =
+                capability_registry.get_runtime_capability(capability_name)
+            {
+                match runtime_capability.uri.as_str() {
+                    "wasmtime:wasip2" => {
+                        // Comprehensive WASI Preview 2 support
+                        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
+                    }
+                    "wasmtime:http" => {
+                        wasmtime_wasi_http::add_only_http_to_linker_async(&mut linker)?;
+                    }
+                    "wasmtime:io" => {
+                        wasmtime_wasi_io::add_to_linker_async(&mut linker)?;
+                    }
+                    "wasmtime:inherit-network" | "wasmtime:allow-ip-name-lookup" => {
+                        // These capabilities are handled in WASI context, not linker
+                        // No linker functions to add, only context configuration
+                    }
+                    _ => {
+                        println!(
+                            "Unknown runtime capability for linker: {}",
+                            runtime_capability.uri
+                        );
+                    }
                 }
-                // Other wasmtime features like inherit-network are handled in WASI context
-                // Skip component capabilities - they're handled during composition
             }
+            // Component capabilities are handled during composition, not at runtime
         }
         Ok(linker)
     }
@@ -85,7 +111,7 @@ impl Invoker {
     pub async fn invoke(
         &self,
         bytes: &[u8],
-        capabilities: &[Capability],
+        capabilities: &[CapabilityName],
         capability_registry: &CapabilityRegistry,
         namespace: String,
         package: String,
@@ -103,8 +129,10 @@ impl Invoker {
 
         // Process wasmtime capabilities for WASI context
         for capability_name in capabilities {
-            if let Some(definition) = capability_registry.get_capability(capability_name) {
-                if let Some(wasmtime_feature) = definition.uri.strip_prefix("wasmtime:") {
+            if let Some(runtime_capability) =
+                capability_registry.get_runtime_capability(capability_name)
+            {
+                if let Some(wasmtime_feature) = runtime_capability.uri.strip_prefix("wasmtime:") {
                     match wasmtime_feature {
                         "inherit-network" => {
                             wasi_builder.inherit_network();
@@ -126,8 +154,8 @@ impl Invoker {
         // Check if any capability requires HTTP context
         let needs_http = capabilities.iter().any(|capability_name| {
             capability_registry
-                .get_capability(capability_name)
-                .and_then(|def| def.uri.strip_prefix("wasmtime:"))
+                .get_runtime_capability(capability_name)
+                .and_then(|cap| cap.uri.strip_prefix("wasmtime:"))
                 == Some("http")
         });
 

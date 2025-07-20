@@ -6,11 +6,12 @@ use std::path::PathBuf;
 mod capabilities;
 mod components;
 mod composer;
+mod interfaces;
 mod resolver;
 mod server;
 
 use capabilities::CapabilityRegistry;
-use resolver::resolve_components;
+use resolver::{resolve_capabilities, resolve_tools};
 use server::ComponentServer;
 
 #[derive(Parser)]
@@ -48,12 +49,12 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
     let capability_registry = if let Some(server_config_path) = &cli.server_config {
-        CapabilityRegistry::from_config_file(server_config_path)?
+        resolve_capabilities(server_config_path)?
     } else {
-        CapabilityRegistry::new() // Empty registry - no capabilities available
+        CapabilityRegistry::empty() // Empty registry - no capabilities available
     };
 
-    let component_specs = resolve_components(&cli.components)?;
+    let component_specs = resolve_tools(&cli.components, &capability_registry)?;
     let server = ComponentServer::new(component_specs, capability_registry)?;
     server.run(addr).await?;
     Ok(())

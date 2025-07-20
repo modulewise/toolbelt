@@ -11,11 +11,9 @@ use rmcp::{
 };
 use std::net::SocketAddr;
 
-mod interfaces;
-
 use crate::capabilities::CapabilityRegistry;
 use crate::components::{ComponentSpec, Invoker};
-use interfaces::{ComponentTool, Parser};
+use crate::interfaces::{ComponentTool, Parser};
 
 #[derive(Clone)]
 pub struct ComponentServer {
@@ -31,22 +29,14 @@ impl ComponentServer {
     ) -> Result<Self> {
         let mut tools = Vec::new();
         for spec in component_specs {
-            if !capability_registry.check_availability(&spec.capabilities) {
-                eprintln!(
-                    "Skipped component '{}', requested unavailable capabilities: {:?}",
-                    spec.name, spec.capabilities
-                );
-                continue;
-            }
-
             match Parser::parse(&spec.bytes, &spec.name) {
                 Ok(component_tools) => {
                     for tool in component_tools {
                         tools.push((tool, spec.clone()));
                     }
                     println!(
-                        "Loaded component '{}' with capabilities: {:?}",
-                        spec.name, spec.capabilities
+                        "Loaded tool '{}' with runtime capabilities: {:?}",
+                        spec.name, spec.runtime_capabilities
                     );
                 }
                 Err(e) => {
@@ -79,7 +69,7 @@ impl ComponentServer {
         tokio::select! {
             result = axum::serve(tcp_listener, router) => {
                 if let Err(err) = result {
-                    eprintln!("Server error: {}", err);
+                    eprintln!("Server error: {err}");
                 }
             }
             _ = tokio::signal::ctrl_c() => {
@@ -118,7 +108,7 @@ impl ComponentServer {
             .invoker
             .invoke(
                 &tool.bytes,
-                &spec.capabilities,
+                &spec.runtime_capabilities,
                 &self.capability_registry,
                 tool.namespace.clone(),
                 tool.package.clone(),
@@ -149,16 +139,16 @@ impl ServerHandler for ComponentServer {
         &self,
         request: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
         if self.tools.iter().any(|(t, _)| t.tool.name == request.name) {
             self.handle_tool_call(&request.name, &arguments)
                 .await
                 .map_err(|e| {
-                    rmcp::Error::internal_error(format!("Component tool error: {e}"), None)
+                    rmcp::ErrorData::internal_error(format!("Component tool error: {e}"), None)
                 })
         } else {
-            Err(rmcp::Error::invalid_params(
+            Err(rmcp::ErrorData::invalid_params(
                 format!("Unknown tool: {}", request.name),
                 None,
             ))
@@ -169,7 +159,7 @@ impl ServerHandler for ComponentServer {
         &self,
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, rmcp::Error> {
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
         let tools = self.tools.iter().map(|(t, _)| t.tool.clone()).collect();
         Ok(ListToolsResult {
             tools,
