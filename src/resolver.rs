@@ -428,10 +428,7 @@ fn resolve_capability_from_toml(
     // Log successful composition operations
     if let Some(config) = &config {
         let config_keys: Vec<_> = config.keys().collect();
-        println!(
-            "Composed capability '{}' with config: {:?}",
-            name, config_keys
-        );
+        println!("Composed capability '{name}' with config: {config_keys:?}");
     }
 
     for dependency_name in &capability.capabilities {
@@ -439,10 +436,7 @@ fn resolve_capability_from_toml(
             .get_component_capability(dependency_name)
             .is_some()
         {
-            println!(
-                "Composed capability '{}' with dependency '{}'",
-                name, dependency_name
-            );
+            println!("Composed capability '{name}' with dependency '{dependency_name}'");
         }
     }
 
@@ -585,7 +579,7 @@ fn resolve_tool(
     // Log successful composition operations
     if let Some(config) = &config {
         let config_keys: Vec<_> = config.keys().collect();
-        println!("Composed tool '{}' with config: {:?}", name, config_keys);
+        println!("Composed tool '{name}' with config: {config_keys:?}");
     }
 
     for capability_name in &component_config.capabilities {
@@ -593,10 +587,7 @@ fn resolve_tool(
             .get_exposed_component_capability(capability_name)
             .is_some()
         {
-            println!(
-                "Composed tool '{}' with capability '{}'",
-                name, capability_name
-            );
+            println!("Composed tool '{name}' with capability '{capability_name}'");
         }
     }
 
