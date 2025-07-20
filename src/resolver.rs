@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
@@ -58,7 +58,7 @@ impl CapabilityRegistryBuilder {
             self.component_capabilities.clone(),
         );
 
-        match resolve_capability_from_toml(&name, &table, &temp_registry) {
+        match resolve_component_capability_from_toml(&name, &table, &temp_registry) {
             Ok(component_capability) => {
                 self.component_capabilities
                     .insert(name, component_capability);
@@ -133,12 +133,12 @@ impl CapabilityRegistryBuilder {
 }
 
 type ToolsAndConfigs = (
-    HashMap<String, ComponentConfig>,
+    HashMap<String, ToolDefinition>,
     HashMap<String, HashMap<String, serde_json::Value>>,
 );
 
 #[derive(Debug, Deserialize, Serialize)]
-struct ComponentConfig {
+struct ToolDefinition {
     uri: String,
     #[serde(default)]
     capabilities: Vec<CapabilityName>,
@@ -351,7 +351,7 @@ fn create_capability_registry(
     builder.build_registry()
 }
 
-fn resolve_capability_from_toml(
+fn resolve_component_capability_from_toml(
     name: &str,
     capability_table: &toml::map::Map<String, toml::Value>,
     capability_registry: &CapabilityRegistry,
@@ -392,7 +392,7 @@ fn resolve_capability_from_toml(
 
     // Compose capability dependencies into this capability component
     let mut remaining_capabilities = Vec::new();
-    let mut all_runtime_capabilities = Vec::new();
+    let mut all_runtime_capabilities = HashSet::new();
 
     for dependency_name in &capability.capabilities {
         if let Some(dependency_capability) =
@@ -409,8 +409,13 @@ fn resolve_capability_from_toml(
                 })?;
 
             // Merge runtime capabilities from composed dependency capability
-            all_runtime_capabilities
-                .extend(dependency_capability.component.runtime_capabilities.clone());
+            all_runtime_capabilities.extend(
+                dependency_capability
+                    .component
+                    .runtime_capabilities
+                    .iter()
+                    .cloned(),
+            );
         } else if capability_registry
             .get_runtime_capability(dependency_name)
             .is_some()
@@ -455,7 +460,7 @@ fn resolve_capability_from_toml(
     let component_spec = ComponentSpec {
         name: name.to_string(),
         bytes,
-        runtime_capabilities: all_runtime_capabilities,
+        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
     };
 
     Ok(ComponentCapability {
@@ -507,9 +512,9 @@ fn resolve_tool_toml_file(
     let (tools, configs) = extract_tools_and_configs(&toml_doc)?;
 
     let mut specs = Vec::new();
-    for (name, component_config) in tools {
+    for (name, tool_definition) in tools {
         let config = configs.get(&name).cloned();
-        match resolve_tool(&name, component_config, config, capability_registry) {
+        match resolve_tool(&name, tool_definition, config, capability_registry) {
             Ok(spec) => {
                 specs.push(spec);
             }
@@ -524,15 +529,15 @@ fn resolve_tool_toml_file(
 
 fn resolve_tool(
     name: &str,
-    component_config: ComponentConfig,
+    tool_definition: ToolDefinition,
     config: Option<HashMap<String, serde_json::Value>>,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ComponentSpec> {
-    let component_path = resolve_uri(&component_config.uri)?;
+    let component_path = resolve_uri(&tool_definition.uri)?;
     let mut bytes = fs::read(&component_path)?;
 
     // Check if all requested capabilities exist before doing import validation
-    for capability_name in &component_config.capabilities {
+    for capability_name in &tool_definition.capabilities {
         if capability_registry
             .get_exposed_runtime_capability(capability_name)
             .is_none()
@@ -557,16 +562,16 @@ fn resolve_tool(
     // Validate imports after config composition (config provides wasi:config/store interfaces)
     validate_imports(
         &bytes,
-        &component_config.capabilities,
+        &tool_definition.capabilities,
         capability_registry,
         true,
     )?;
 
     // Compose with component capabilities
     let mut remaining_capabilities = Vec::new();
-    let mut all_runtime_capabilities = Vec::new();
+    let mut all_runtime_capabilities = HashSet::new();
 
-    for capability_name in &component_config.capabilities {
+    for capability_name in &tool_definition.capabilities {
         if let Some(component_capability) =
             capability_registry.get_exposed_component_capability(capability_name)
         {
@@ -581,8 +586,13 @@ fn resolve_tool(
                 })?;
 
             // Merge runtime capabilities from composed component capability
-            all_runtime_capabilities
-                .extend(component_capability.component.runtime_capabilities.clone());
+            all_runtime_capabilities.extend(
+                component_capability
+                    .component
+                    .runtime_capabilities
+                    .iter()
+                    .cloned(),
+            );
         } else if capability_registry
             .get_exposed_runtime_capability(capability_name)
             .is_some()
@@ -607,7 +617,7 @@ fn resolve_tool(
         println!("Composed tool '{name}' with config: {config_keys:?}");
     }
 
-    for capability_name in &component_config.capabilities {
+    for capability_name in &tool_definition.capabilities {
         if capability_registry
             .get_exposed_component_capability(capability_name)
             .is_some()
@@ -619,7 +629,7 @@ fn resolve_tool(
     Ok(ComponentSpec {
         name: name.to_string(),
         bytes,
-        runtime_capabilities: all_runtime_capabilities,
+        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
     })
 }
 
@@ -638,12 +648,11 @@ fn extract_tools_and_configs(toml_doc: &toml::Value) -> Result<ToolsAndConfigs> 
 
                 // Parse the tool definition (excluding the config subtable)
                 let mut tool_value = tool_table.clone();
-                tool_value.remove("config"); // Remove config before parsing as ComponentConfig
-                let component_config: ComponentConfig =
-                    toml::Value::Table(tool_value)
-                        .try_into()
-                        .map_err(|e| anyhow::anyhow!("Failed to parse tool '{}': {}", key, e))?;
-                tools.insert(key.clone(), component_config);
+                tool_value.remove("config"); // Remove config before parsing as ToolDefinition
+                let tool_definition: ToolDefinition = toml::Value::Table(tool_value)
+                    .try_into()
+                    .map_err(|e| anyhow::anyhow!("Failed to parse tool '{}': {}", key, e))?;
+                tools.insert(key.clone(), tool_definition);
             }
         }
     }
