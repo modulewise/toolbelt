@@ -346,9 +346,9 @@ fn resolve_capability_from_toml(
 ) -> Result<ComponentCapability> {
     // Extract config subtable if present
     let config = if let Some(toml::Value::Table(config_table)) = capability_table.get("config") {
-        convert_toml_table_to_json_map(config_table)?
+        Some(convert_toml_table_to_json_map(config_table)?)
     } else {
-        HashMap::new()
+        None
     };
 
     // Parse capability definition (excluding config subtable)
@@ -370,13 +370,8 @@ fn resolve_capability_from_toml(
     let mut bytes = fs::read(&component_path)?;
 
     // Compose if config exists, even if empty (satisfies imports with defaults)
-    if capability_table.contains_key("config") {
-        println!(
-            "Composing capability '{}' with config: {:?}",
-            name,
-            config.keys().collect::<Vec<_>>()
-        );
-        bytes = Composer::compose_tool_with_config(&bytes, &config).map_err(|e| {
+    if let Some(config) = &config {
+        bytes = Composer::compose_tool_with_config(&bytes, config).map_err(|e| {
             anyhow::anyhow!("Failed to compose capability '{}' with config: {}", name, e)
         })?;
     }
@@ -391,7 +386,6 @@ fn resolve_capability_from_toml(
         if let Some(dependency_capability) =
             capability_registry.get_component_capability(dependency_name)
         {
-            println!("Composing capability '{name}' with dependency '{dependency_name}'");
             bytes = Composer::compose_components(&bytes, &dependency_capability.component.bytes)
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -430,6 +424,27 @@ fn resolve_capability_from_toml(
             e
         )
     })?;
+
+    // Log successful composition operations
+    if let Some(config) = &config {
+        let config_keys: Vec<_> = config.keys().collect();
+        println!(
+            "Composed capability '{}' with config: {:?}",
+            name, config_keys
+        );
+    }
+
+    for dependency_name in &capability.capabilities {
+        if capability_registry
+            .get_component_capability(dependency_name)
+            .is_some()
+        {
+            println!(
+                "Composed capability '{}' with dependency '{}'",
+                name, dependency_name
+            );
+        }
+    }
 
     let component_spec = ComponentSpec {
         name: name.to_string(),
@@ -474,7 +489,8 @@ fn resolve_tool_toml_file(
 
     let mut specs = Vec::new();
     for (name, component_config) in tools {
-        match resolve_tool(&name, component_config, &configs, capability_registry) {
+        let config = configs.get(&name).cloned();
+        match resolve_tool(&name, component_config, config, capability_registry) {
             Ok(spec) => {
                 specs.push(spec);
             }
@@ -490,12 +506,11 @@ fn resolve_tool_toml_file(
 fn resolve_tool(
     name: &str,
     component_config: ComponentConfig,
-    configs: &HashMap<String, HashMap<String, serde_json::Value>>,
+    config: Option<HashMap<String, serde_json::Value>>,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ComponentSpec> {
     let component_path = resolve_uri(&component_config.uri)?;
     let mut bytes = fs::read(&component_path)?;
-    let config = configs.get(name).cloned().unwrap_or_default();
 
     // Check if all requested capabilities exist before doing import validation
     for capability_name in &component_config.capabilities {
@@ -515,13 +530,8 @@ fn resolve_tool(
     }
 
     // Compose if config exists, even if empty (satisfies imports with defaults)
-    if configs.contains_key(name) {
-        println!(
-            "Composing {} with config: {:?}",
-            name,
-            config.keys().collect::<Vec<_>>()
-        );
-        bytes = Composer::compose_tool_with_config(&bytes, &config)
+    if let Some(config) = &config {
+        bytes = Composer::compose_tool_with_config(&bytes, config)
             .map_err(|e| anyhow::anyhow!("Failed to compose {} with config: {}", name, e))?;
     }
 
@@ -541,7 +551,6 @@ fn resolve_tool(
         if let Some(component_capability) =
             capability_registry.get_exposed_component_capability(capability_name)
         {
-            println!("Composing tool '{name}' with capability '{capability_name}'");
             bytes = Composer::compose_components(&bytes, &component_capability.component.bytes)
                 .map_err(|e| {
                     anyhow::anyhow!(
@@ -572,6 +581,24 @@ fn resolve_tool(
 
     // Merge tool's direct runtime capabilities with those from composed capabilities
     all_runtime_capabilities.extend(remaining_capabilities);
+
+    // Log successful composition operations
+    if let Some(config) = &config {
+        let config_keys: Vec<_> = config.keys().collect();
+        println!("Composed tool '{}' with config: {:?}", name, config_keys);
+    }
+
+    for capability_name in &component_config.capabilities {
+        if capability_registry
+            .get_exposed_component_capability(capability_name)
+            .is_some()
+        {
+            println!(
+                "Composed tool '{}' with capability '{}'",
+                name, capability_name
+            );
+        }
+    }
 
     Ok(ComponentSpec {
         name: name.to_string(),
