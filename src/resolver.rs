@@ -154,10 +154,19 @@ pub fn resolve_tools(
         if path.is_file() {
             if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
                 match extension {
-                    "wasm" => {
-                        let spec = resolve_wasm_file(path)?;
-                        component_specs.push(spec);
-                    }
+                    "wasm" => match resolve_wasm_file(path) {
+                        Ok(spec) => {
+                            component_specs.push(spec);
+                        }
+                        Err(e) => {
+                            let name = path
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("unknown");
+                            eprintln!("Warning: Skipping tool '{name}' due to error: {e}");
+                            continue;
+                        }
+                    },
                     "toml" => {
                         let specs = resolve_tool_toml_file(path, capability_registry)?;
                         component_specs.extend(specs);
@@ -468,6 +477,19 @@ fn resolve_wasm_file(path: &PathBuf) -> Result<ComponentSpec> {
         })?
         .to_string();
     let bytes = fs::read(path)?;
+
+    // Direct .wasm files should be self-contained components only
+    let component_imports = Parser::discover_imports(&bytes).map_err(|e| {
+        anyhow::anyhow!("Failed to discover component imports for '{}': {}", name, e)
+    })?;
+
+    if !component_imports.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Loaded .wasm directly with unsatisfied imports: {:?}. Use .toml to specify required capabilities.",
+            component_imports
+        ));
+    }
+
     Ok(ComponentSpec {
         name,
         bytes,
