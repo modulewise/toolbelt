@@ -47,12 +47,6 @@ fn default_exposed() -> bool {
     false
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ServerConfig {
-    #[serde(default)]
-    pub capabilities: HashMap<String, Capability>,
-}
-
 impl CapabilityRegistry {
     /// Create a new registry from resolved capability maps
     pub fn new(

@@ -6,13 +6,13 @@ use wac_types::Package;
 pub struct Composer;
 
 impl Composer {
-    pub fn compose_tool_with_config(
-        tool_bytes: &[u8],
+    pub fn compose_with_config(
+        component_bytes: &[u8],
         config: &HashMap<String, serde_json::Value>,
     ) -> Result<Vec<u8>> {
         // Note: empty config will create an empty wasi:config/store component
         let config_component_bytes = create_config_component(config)?;
-        Self::compose_components(tool_bytes, &config_component_bytes)
+        Self::compose_components(component_bytes, &config_component_bytes)
     }
 
     /// Compose two components: plug_bytes gets plugged into socket_bytes

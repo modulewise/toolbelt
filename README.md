@@ -15,24 +15,84 @@ cargo run -- hello.wasm calculator.wasm
 ```
 
 By default, components operate in a least-privilege capability mode.
-If your component requires capabilities from the host runtime, use a `.toml` file:
+If your component requires capabilities from the host runtime, you can
+specify those capabilities in a `.toml` file (the `exposed` flag means
+they are available to tools, otherwise they are only available as
+dependencies for other capabilities):
 
+`capabilities.toml:`
+```toml
+[wasip2]
+uri = "wasmtime:wasip2"
+exposed = true
+
+[http]
+uri = "wasmtime:http"
+exposed = true
 ```
+
+And then define the tool component in its own `.toml` file:
+
+`flights.toml`
+```toml
 [flights]
-uri="file:///path/to/flight-search.wasm"
-capabilities=["http"]
+uri = "file:///path/to/flight-search.wasm"
+capabilities = ["wasip2", http"]
 ```
 
-Then pass that to the server instead of a direct `.wasm` file:
+Pass the capability and tool files to the server instead of direct `.wasm` files:
 
 ```sh
-cargo run -- flights.toml
+toolbelt -c capabilities.toml -t flights.toml
 ```
 
 > [!TIP]
 >
 > Multiple components can be defined within a single `.toml` file, and capabilities are optional (uri is required).
-> Currently supported capabilities are: `http`, `inherit-network`, and `allow-ip-name-lookup`
+> Available host runtime capabilities are: `wasip2`, `http`, `io`, `inherit-network`, and `allow-ip-name-lookup`
+
+Wasm Components can also be registered as capabilities, and they may have their own capability dependencies.
+(Notice that the lower-level capabilities are not `exposed` to tools):
+
+`runtime-capabilities.toml`
+```toml
+[wasip2]
+uri = "wasmtime:wasip2"
+
+[inherit-network]
+uri="wasmtime:inherit-network"
+```
+
+Those runtime capabilities are then required by a component capability:
+
+`keyvalue.toml`
+```toml
+[keyvalue]
+uri = "../example-components/lib/valkey-client.wasm"
+capabilities = ["wasip2", "inherit-network"]
+exposed = true
+```
+
+And then that higher-level capability can be composed into tool components:
+
+`incrementor.toml`
+```toml
+[incrementor]
+uri = "../example-components/lib/incrementor.wasm"
+capabilities = ["keyvalue"]
+
+[incrementor.config]
+bucket = "things"
+```
+
+Multiple capability and tool files can be passed to the server:
+
+```sh
+toolbelt -c runtime-capabilities.toml -c keyvalue.toml -t incrementor.toml
+```
+
+This allows for various combinations of reusable capability sets and tool sets.
+It also provides encapsulation and promotes separation of concerns.
 
 ## Test with MCP Inspector
 
