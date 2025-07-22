@@ -18,41 +18,6 @@ pub struct CapabilityRegistry {
     pub component_capabilities: HashMap<String, ComponentCapability>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Capability {
-    /// URI indicating the capability implementation
-    /// - "wasmtime:capability-name" for runtime capabilities
-    /// - Component URIs for component-based capabilities
-    pub uri: String,
-
-    /// Whether tools can directly request this capability
-    /// If false, only other capabilities can depend on it
-    #[serde(default = "default_exposed")]
-    pub exposed: bool,
-
-    /// Capabilities that this capability depends on
-    #[serde(default)]
-    pub capabilities: Vec<CapabilityName>,
-
-    /// Configuration for this capability (if it's a component)
-    /// Maps to [capabilities.name.config] in TOML
-    #[serde(default)]
-    pub config: HashMap<String, serde_json::Value>,
-
-    #[serde(default)]
-    pub description: Option<String>,
-}
-
-fn default_exposed() -> bool {
-    false
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ServerConfig {
-    #[serde(default)]
-    pub capabilities: HashMap<String, Capability>,
-}
-
 impl CapabilityRegistry {
     /// Create a new registry from resolved capability maps
     pub fn new(

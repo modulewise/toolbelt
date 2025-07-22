@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use crate::capabilities::CapabilityRegistry;
 use crate::components::{ComponentSpec, Invoker};
 use crate::interfaces::{ComponentTool, Parser};
+use crate::resolver::ToolRegistry;
 
 #[derive(Clone)]
 pub struct ComponentServer {
@@ -24,11 +25,11 @@ pub struct ComponentServer {
 
 impl ComponentServer {
     pub fn new(
-        component_specs: Vec<ComponentSpec>,
         capability_registry: CapabilityRegistry,
+        tool_registry: ToolRegistry,
     ) -> Result<Self> {
         let mut tools = Vec::new();
-        for spec in component_specs {
+        for (_name, spec) in tool_registry {
             match Parser::parse(&spec.bytes, &spec.name) {
                 Ok(component_tools) => {
                     for tool in component_tools {

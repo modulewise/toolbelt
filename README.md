@@ -6,33 +6,108 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that e
 
 (auth, observability, and OCI support are on the roadmap)
 
+## Build
+
+Prerequisite: a current [rust toolchain](https://www.rust-lang.org/tools/install)
+
+Clone the [toolbelt](https://github.com/modulewise/toolbelt) project if you have not already.
+
+Then from within the `toolbelt` directory:
+
+```
+cargo install --path .
+```
+
+That will build the binary with the `release` profile and add
+it to your cargo bin directory which should be on your PATH.
+
 ## Run
 
 One or more `.wasm` files may be provided as command line arguments (see [example-components](https://github.com/modulewise/example-components)):
 
 ```sh
-cargo run -- hello.wasm calculator.wasm
+toolbelt hello.wasm calculator.wasm
 ```
 
 By default, components operate in a least-privilege capability mode.
-If your component requires capabilities from the host runtime, use a `.toml` file:
+If your component requires capabilities from the host runtime, you can
+specify those capabilities in a `.toml` file (the `exposed` flag means
+they are available to tools, otherwise they are only available as
+dependencies for other capabilities):
 
+`capabilities.toml:`
+```toml
+[wasip2]
+uri = "wasmtime:wasip2"
+exposed = true
+
+[http]
+uri = "wasmtime:http"
+exposed = true
 ```
+
+And then define the tool component in its own `.toml` file:
+
+`flights.toml`
+```toml
 [flights]
-uri="file:///path/to/flight-search.wasm"
-capabilities=["http"]
+uri = "file:///path/to/flight-search.wasm"
+capabilities = ["wasip2", "http"]
 ```
 
-Then pass that to the server instead of a direct `.wasm` file:
+Pass the capability and tool files to the server instead of direct `.wasm` files:
 
 ```sh
-cargo run -- flights.toml
+toolbelt -c capabilities.toml -t flights.toml
 ```
 
 > [!TIP]
 >
 > Multiple components can be defined within a single `.toml` file, and capabilities are optional (uri is required).
-> Currently supported capabilities are: `http`, `inherit-network`, and `allow-ip-name-lookup`
+> Available host runtime capabilities are: `wasip2`, `http`, `io`, `inherit-network`, and `allow-ip-name-lookup`
+
+Wasm Components can also be registered as capabilities, and they may have their own capability dependencies.
+(Notice that the lower-level capabilities are not `exposed` to tools):
+
+`runtime-capabilities.toml`
+```toml
+[wasip2]
+uri = "wasmtime:wasip2"
+
+[inherit-network]
+uri = "wasmtime:inherit-network"
+```
+
+Those runtime capabilities are then required by a component capability:
+
+`keyvalue.toml`
+```toml
+[keyvalue]
+uri = "../example-components/lib/valkey-client.wasm"
+capabilities = ["wasip2", "inherit-network"]
+exposed = true
+```
+
+And then that higher-level capability can be composed into tool components:
+
+`incrementor.toml`
+```toml
+[incrementor]
+uri = "../example-components/lib/incrementor.wasm"
+capabilities = ["keyvalue"]
+
+[incrementor.config]
+bucket = "things"
+```
+
+Multiple capability and tool files can be passed to the server:
+
+```sh
+toolbelt -c runtime-capabilities.toml -c keyvalue.toml -t incrementor.toml
+```
+
+This allows for various combinations of reusable capability sets and tool sets.
+It also promotes separation of concerns.
 
 ## Test with MCP Inspector
 
@@ -40,9 +115,9 @@ cargo run -- flights.toml
 
 2. Start the [MCP Inspector](https://github.com/modelcontextprotocol/inspector?tab=readme-ov-file#quick-start-ui-mode).
 
-3. Ensure the `SSE` Transport Type is selected.
+3. Ensure the `Streamable HTTP` Transport Type is selected.
 
-4. Ensure the specified URL is `http://127.0.0.1:3001/sse` (or replace host and port if not using defaults).
+4. Ensure the specified URL is `http://127.0.0.1:3001/mcp` (replace host or port if not using defaults).
 
 5. Click `Connect` and then `List Tools`.
 

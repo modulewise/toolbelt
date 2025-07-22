@@ -4,22 +4,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::capabilities::{Capability, CapabilityRegistry, RuntimeCapability};
+use crate::capabilities::{CapabilityRegistry, RuntimeCapability};
 use crate::components::{CapabilityName, ComponentCapability, ComponentSpec};
 use crate::composer::Composer;
 use crate::interfaces::Parser;
 
-#[derive(Debug)]
-struct ResolvedCapability {
-    name: String,
-    capability: Capability,
-    original_table: toml::map::Map<String, toml::Value>,
-}
+pub type ToolRegistry = HashMap<String, ComponentSpec>;
 
 struct CapabilityRegistryBuilder {
     runtime_capabilities: HashMap<String, RuntimeCapability>,
     component_capabilities: HashMap<String, ComponentCapability>,
-    pending: VecDeque<(String, toml::map::Map<String, toml::Value>)>,
+    pending: VecDeque<CapabilityDefinition>,
     last_errors: HashMap<String, String>, // Track last error for each capability
 }
 
@@ -37,20 +32,15 @@ impl CapabilityRegistryBuilder {
         self.runtime_capabilities.insert(name, capability);
     }
 
-    fn add_pending_component_capability(
-        &mut self,
-        name: String,
-        table: toml::map::Map<String, toml::Value>,
-    ) {
-        self.pending.push_back((name, table));
+    fn add_pending_component_capability_definition(&mut self, definition: CapabilityDefinition) {
+        self.pending.push_back(definition);
     }
 
     fn try_next(&mut self) -> Result<Option<bool>> {
         if self.pending.is_empty() {
             return Ok(None);
         }
-
-        let (name, table) = self.pending.pop_front().unwrap();
+        let definition = self.pending.pop_front().unwrap();
 
         // Create a temporary registry with current state for dependency checking
         let temp_registry = CapabilityRegistry::new(
@@ -58,10 +48,10 @@ impl CapabilityRegistryBuilder {
             self.component_capabilities.clone(),
         );
 
-        match resolve_component_capability_from_toml(&name, &table, &temp_registry) {
+        match resolve_component_capability_from_definition(&definition, &temp_registry) {
             Ok(component_capability) => {
                 self.component_capabilities
-                    .insert(name, component_capability);
+                    .insert(definition.name.clone(), component_capability);
                 Ok(Some(true)) // Successfully resolved
             }
             Err(e) => {
@@ -69,14 +59,14 @@ impl CapabilityRegistryBuilder {
                 if error_msg.contains("unavailable dependency")
                     || error_msg.contains("unauthorized interface")
                 {
-                    self.last_errors.insert(name.clone(), error_msg);
-                    self.pending.push_back((name, table));
+                    self.last_errors.insert(definition.name.clone(), error_msg);
+                    self.pending.push_back(definition);
                     Ok(Some(false)) // Failed but retryable
                 } else {
                     // Other errors are real failures
                     Err(anyhow::anyhow!(
                         "Failed to resolve capability '{}': {}",
-                        name,
+                        definition.name,
                         e
                     ))
                 }
@@ -102,17 +92,17 @@ impl CapabilityRegistryBuilder {
                         let detailed_errors: Vec<String> = self
                             .pending
                             .iter()
-                            .map(|(name, _)| {
-                                if let Some(error) = self.last_errors.get(name) {
-                                    format!("'{name}': {error}")
+                            .map(|definition| {
+                                if let Some(error) = self.last_errors.get(&definition.name) {
+                                    format!("'{}': {error}", definition.name)
                                 } else {
-                                    format!("'{name}': unknown error")
+                                    format!("'{}': unknown error", definition.name)
                                 }
                             })
                             .collect();
 
                         return Err(anyhow::anyhow!(
-                            "Cannot resolve remaining capabilities:\n{}",
+                            "Cannot resolve capability dependencies:\n{}",
                             detailed_errors.join("\n")
                         ));
                     }
@@ -132,94 +122,366 @@ impl CapabilityRegistryBuilder {
     }
 }
 
-type ToolsAndConfigs = (
-    HashMap<String, ToolDefinition>,
-    HashMap<String, HashMap<String, serde_json::Value>>,
-);
-
 #[derive(Debug, Deserialize, Serialize)]
-struct ToolDefinition {
+struct ComponentDefinition {
     uri: String,
+    config: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     capabilities: Vec<CapabilityName>,
 }
 
-/// Resolve tools from config files
-pub fn resolve_tools(
-    input_paths: &[PathBuf],
-    capability_registry: &CapabilityRegistry,
-) -> Result<Vec<ComponentSpec>> {
-    let mut component_specs = Vec::new();
-    for path in input_paths {
-        if path.is_file() {
-            if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-                match extension {
-                    "wasm" => match resolve_wasm_file(path) {
-                        Ok(spec) => {
-                            component_specs.push(spec);
-                        }
-                        Err(e) => {
-                            let name = path
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("unknown");
-                            eprintln!("Warning: Skipping tool '{name}' due to error: {e}");
-                            continue;
-                        }
-                    },
-                    "toml" => {
-                        let specs = resolve_tool_toml_file(path, capability_registry)?;
-                        component_specs.extend(specs);
-                    }
-                    _ => {
-                        return Err(anyhow::anyhow!("Unsupported file type: {}", path.display()));
-                    }
-                }
+#[derive(Debug, Deserialize, Serialize)]
+struct CapabilityDefinition {
+    name: String,
+    #[serde(flatten)]
+    base: ComponentDefinition,
+    #[serde(default)]
+    exposed: bool,
+}
+
+impl std::ops::Deref for CapabilityDefinition {
+    type Target = ComponentDefinition;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ToolDefinition {
+    name: String,
+    #[serde(flatten)]
+    base: ComponentDefinition,
+}
+
+impl std::ops::Deref for ToolDefinition {
+    type Target = ComponentDefinition;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+pub fn build_registries(
+    capability_files: &[PathBuf],
+    tool_files: &[PathBuf],
+    mixed_definition_files: &[PathBuf], // .toml and .wasm files
+) -> Result<(CapabilityRegistry, ToolRegistry)> {
+    let mut definition_files = Vec::new();
+    let mut wasm_files = Vec::new();
+
+    for path in mixed_definition_files {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+            match extension {
+                "wasm" => wasm_files.push(path.clone()),
+                "toml" => definition_files.push(path.clone()),
+                _ => return Err(anyhow::anyhow!("Unsupported file type: {}", path.display())),
             }
-        } else if path.is_dir() {
-            let dir_specs = resolve_directory(path)?;
-            component_specs.extend(dir_specs);
         } else {
-            return Err(anyhow::anyhow!("Path does not exist: {}", path.display()));
+            return Err(anyhow::anyhow!(
+                "File without extension: {}",
+                path.display()
+            ));
         }
     }
-    Ok(component_specs)
+
+    let (capability_definitions, tool_definitions) =
+        build_definitions(capability_files, tool_files, &definition_files, &wasm_files)?;
+
+    let capability_registry = create_capability_registry(capability_definitions)?;
+    let tool_registry = create_tool_registry(tool_definitions, &capability_registry)?;
+
+    Ok((capability_registry, tool_registry))
 }
 
-/// Resolve capabilities (runtime + component) from server config file
-pub fn resolve_capabilities(server_config_path: &PathBuf) -> Result<CapabilityRegistry> {
-    let content = fs::read_to_string(server_config_path)?;
-    let toml_doc: toml::Value = toml::from_str(&content)?;
-    let resolved_capabilities = parse_all_capabilities(&toml_doc)?;
-    create_capability_registry(&resolved_capabilities)
-}
+fn build_definitions(
+    capability_files: &[PathBuf],
+    tool_files: &[PathBuf],
+    definition_files: &[PathBuf],
+    wasm_files: &[PathBuf],
+) -> Result<(Vec<CapabilityDefinition>, Vec<ToolDefinition>)> {
+    let mut capability_definitions = Vec::new();
+    let mut tool_definitions = Vec::new();
 
-fn parse_all_capabilities(toml_doc: &toml::Value) -> Result<Vec<ResolvedCapability>> {
-    let mut resolved_capabilities = Vec::new();
-    if let toml::Value::Table(table) = toml_doc {
-        if let Some(toml::Value::Table(capabilities_table)) = table.get("capabilities") {
-            for (name, value) in capabilities_table {
-                if let toml::Value::Table(capability_table) = value {
-                    // Parse capability definition (excluding config subtable)
-                    let mut capability_value = capability_table.clone();
-                    capability_value.remove("config");
+    for file in capability_files {
+        capability_definitions.extend(parse_capability_file(file)?);
+    }
+    for file in tool_files {
+        tool_definitions.extend(parse_tool_file(file)?);
+    }
+    for file in definition_files {
+        let (caps, tools) = parse_definition_file(file)?;
+        capability_definitions.extend(caps);
+        tool_definitions.extend(tools);
+    }
+    tool_definitions.extend(create_implicit_tool_definitions(wasm_files)?);
 
-                    let capability: Capability = toml::Value::Table(capability_value)
-                        .try_into()
-                        .map_err(|e| {
-                            anyhow::anyhow!("Failed to parse capability '{}': {}", name, e)
-                        })?;
+    // Collision detection for capabilities
+    let mut capability_names = HashSet::new();
+    for def in &capability_definitions {
+        if !capability_names.insert(&def.name) {
+            return Err(anyhow::anyhow!("Duplicate capability name: '{}'", def.name));
+        }
+    }
 
-                    resolved_capabilities.push(ResolvedCapability {
-                        name: name.clone(),
-                        capability,
-                        original_table: capability_table.clone(),
-                    });
-                }
+    // Validate capability dependencies exist
+    for def in &capability_definitions {
+        for dep_name in &def.capabilities {
+            if !capability_names.contains(dep_name) {
+                return Err(anyhow::anyhow!(
+                    "Capability '{}' depends on undefined capability '{}'",
+                    def.name,
+                    dep_name
+                ));
             }
         }
     }
-    Ok(resolved_capabilities)
+
+    // Collision detection for tools
+    let mut tool_names = HashSet::new();
+    for def in &tool_definitions {
+        if !tool_names.insert(&def.name) {
+            return Err(anyhow::anyhow!("Duplicate tool name: '{}'", def.name));
+        }
+    }
+    for capability_name in &capability_names {
+        if tool_names.contains(capability_name) {
+            return Err(anyhow::anyhow!(
+                "Name collision: '{}' is defined as both a capability and a tool",
+                capability_name
+            ));
+        }
+    }
+
+    Ok((capability_definitions, tool_definitions))
+}
+
+fn parse_capability_file(path: &PathBuf) -> Result<Vec<CapabilityDefinition>> {
+    let content = fs::read_to_string(path)?;
+    let toml_doc: toml::Value = toml::from_str(&content)?;
+    parse_capabilities_from_toml(&toml_doc)
+}
+
+fn parse_tool_file(path: &PathBuf) -> Result<Vec<ToolDefinition>> {
+    let content = fs::read_to_string(path)?;
+    let toml_doc: toml::Value = toml::from_str(&content)?;
+    parse_tools_from_toml(&toml_doc)
+}
+
+fn parse_definition_file(
+    path: &PathBuf,
+) -> Result<(Vec<CapabilityDefinition>, Vec<ToolDefinition>)> {
+    let content = fs::read_to_string(path)?;
+    let toml_doc: toml::Value = toml::from_str(&content)?;
+
+    let (caps_section, tools_section) = split_namespaced_toml(&toml_doc);
+
+    let capabilities = if let Some(section) = caps_section {
+        parse_capabilities_from_toml(section)?
+    } else {
+        Vec::new()
+    };
+
+    let tools = if let Some(section) = tools_section {
+        parse_tools_from_toml(section)?
+    } else {
+        Vec::new()
+    };
+
+    // If no namespaced sections found, check if there are top-level sections that might be tools
+    if capabilities.is_empty() && tools.is_empty() {
+        if let toml::Value::Table(table) = &toml_doc {
+            if !table.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No [capabilities.*] or [tools.*] sections found in '{}', but found top-level sections. Use the -t flag if it is a tool definition file.",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok((capabilities, tools))
+}
+
+fn split_namespaced_toml(toml_doc: &toml::Value) -> (Option<&toml::Value>, Option<&toml::Value>) {
+    if let toml::Value::Table(table) = toml_doc {
+        let capabilities_section = table.get("capabilities");
+        let tools_section = table.get("tools");
+        (capabilities_section, tools_section)
+    } else {
+        (None, None)
+    }
+}
+
+fn parse_capabilities_from_toml(
+    capabilities_section: &toml::Value,
+) -> Result<Vec<CapabilityDefinition>> {
+    let mut definitions = Vec::new();
+    if let toml::Value::Table(table) = capabilities_section {
+        for (name, value) in table {
+            if let toml::Value::Table(capability_table) = value {
+                let definition = parse_capability_toml_table(name, capability_table)?;
+                definitions.push(definition);
+            }
+        }
+    }
+    Ok(definitions)
+}
+
+fn parse_tools_from_toml(tools_section: &toml::Value) -> Result<Vec<ToolDefinition>> {
+    let mut definitions = Vec::new();
+    if let toml::Value::Table(table) = tools_section {
+        for (name, value) in table {
+            if let toml::Value::Table(tool_table) = value {
+                let component = parse_component_toml_table(name, tool_table)?;
+                let definition = ToolDefinition {
+                    name: name.to_string(),
+                    base: component,
+                };
+                definitions.push(definition);
+            }
+        }
+    }
+    Ok(definitions)
+}
+
+fn parse_capability_toml_table(
+    name: &str,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<CapabilityDefinition> {
+    let component = parse_component_toml_table(name, table)?;
+    let exposed = table
+        .get("exposed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(CapabilityDefinition {
+        name: name.to_string(),
+        base: component,
+        exposed,
+    })
+}
+
+fn parse_component_toml_table(
+    name: &str,
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<ComponentDefinition> {
+    let config = extract_config_from_table(table);
+
+    let mut definition_value = table.clone();
+    definition_value.remove("config");
+
+    let mut component: ComponentDefinition = toml::Value::Table(definition_value)
+        .try_into()
+        .map_err(|e| anyhow::anyhow!("Failed to parse component '{}': {}", name, e))?;
+
+    component.config = config;
+    Ok(component)
+}
+
+fn extract_config_from_table(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Option<HashMap<String, serde_json::Value>> {
+    if let Some(toml::Value::Table(config_table)) = table.get("config") {
+        Some(convert_toml_table_to_json_map(config_table).unwrap())
+    } else {
+        None
+    }
+}
+
+fn convert_toml_table_to_json_map(
+    table: &toml::map::Map<String, toml::Value>,
+) -> Result<HashMap<String, serde_json::Value>> {
+    let mut map = HashMap::new();
+    for (key, value) in table {
+        let json_value = convert_toml_value_to_json(value)?;
+        map.insert(key.clone(), json_value);
+    }
+    Ok(map)
+}
+
+fn convert_toml_value_to_json(value: &toml::Value) -> Result<serde_json::Value> {
+    match value {
+        toml::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        toml::Value::Integer(i) => Ok(serde_json::Value::Number((*i).into())),
+        toml::Value::Float(f) => Ok(serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)),
+        toml::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
+        toml::Value::Array(arr) => {
+            let json_arr: Result<Vec<_>, _> = arr.iter().map(convert_toml_value_to_json).collect();
+            Ok(serde_json::Value::Array(json_arr?))
+        }
+        toml::Value::Table(table) => {
+            let json_map = convert_toml_table_to_json_map(table)?;
+            let json_obj: serde_json::Map<String, serde_json::Value> =
+                json_map.into_iter().collect();
+            Ok(serde_json::Value::Object(json_obj))
+        }
+        toml::Value::Datetime(dt) => Ok(serde_json::Value::String(dt.to_string())),
+    }
+}
+
+fn create_implicit_tool_definitions(wasm_files: &[PathBuf]) -> Result<Vec<ToolDefinition>> {
+    let mut definitions = Vec::new();
+    for path in wasm_files {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Cannot extract component name from path: {}",
+                    path.display()
+                )
+            })?
+            .to_string();
+        let definition = ToolDefinition {
+            name,
+            base: ComponentDefinition {
+                uri: path.to_string_lossy().to_string(),
+                config: None,
+                capabilities: Vec::new(),
+            },
+        };
+        definitions.push(definition);
+    }
+    Ok(definitions)
+}
+
+fn create_capability_registry(
+    definitions: Vec<CapabilityDefinition>,
+) -> Result<CapabilityRegistry> {
+    let mut builder = CapabilityRegistryBuilder::new();
+    for def in definitions {
+        if def.uri.starts_with("wasmtime:") {
+            let interfaces = get_interfaces_for_runtime_capability(&def.uri);
+            let runtime_capability = RuntimeCapability {
+                uri: def.uri.clone(),
+                exposed: def.exposed,
+                interfaces,
+            };
+            builder.add_runtime_capability(def.name.clone(), runtime_capability);
+        } else {
+            builder.add_pending_component_capability_definition(def);
+        }
+    }
+    builder.build_registry()
+}
+
+fn create_tool_registry(
+    definitions: Vec<ToolDefinition>,
+    capability_registry: &CapabilityRegistry,
+) -> Result<ToolRegistry> {
+    let mut tool_registry = HashMap::new();
+    for def in definitions {
+        match process_tool_definition(&def, capability_registry) {
+            Ok(spec) => {
+                tool_registry.insert(def.name.clone(), spec);
+            }
+            Err(e) => {
+                eprintln!("Warning: Skipping tool '{}' due to error: {e}", def.name);
+                continue;
+            }
+        }
+    }
+    Ok(tool_registry)
 }
 
 fn get_interfaces_for_runtime_capability(uri: &str) -> Vec<String> {
@@ -269,16 +531,241 @@ fn get_interfaces_for_runtime_capability(uri: &str) -> Vec<String> {
     }
 }
 
-/// Validate that component only imports interfaces covered by requested capabilities
-fn validate_imports(
-    component_bytes: &[u8],
-    requested_capabilities: &[CapabilityName],
+fn resolve_component_capability_from_definition(
+    definition: &CapabilityDefinition,
     capability_registry: &CapabilityRegistry,
-    is_tool: bool, // true for tools (only exposed capabilities), false for capabilities (any dependency)
-) -> Result<()> {
-    let component_imports = Parser::discover_imports(component_bytes)
+) -> Result<ComponentCapability> {
+    if definition.uri.starts_with("wasmtime:") {
+        return Err(anyhow::anyhow!(
+            "Wasmtime capability '{}' should not be resolved as component",
+            definition.name
+        ));
+    }
+    let component_spec = process_capability_definition(definition, capability_registry)?;
+    let exports = Parser::discover_exports(&component_spec.bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to discover exports for capability '{}': {}",
+            definition.name,
+            e
+        )
+    })?;
+    Ok(ComponentCapability {
+        component: component_spec,
+        exposed: definition.exposed,
+        exports,
+    })
+}
+
+fn process_capability_definition(
+    definition: &CapabilityDefinition,
+    capability_registry: &CapabilityRegistry,
+) -> Result<ComponentSpec> {
+    let component_spec = process_component_core(
+        &definition.name,
+        &definition.uri,
+        &definition.config,
+        &definition.capabilities,
+        capability_registry,
+        false, // is_tool
+    )?;
+    for dependency_name in &definition.capabilities {
+        if capability_registry
+            .get_component_capability(dependency_name)
+            .is_some()
+        {
+            println!(
+                "Composed capability '{}' with dependency '{dependency_name}'",
+                definition.name
+            );
+        }
+    }
+    Ok(component_spec)
+}
+
+fn process_tool_definition(
+    definition: &ToolDefinition,
+    capability_registry: &CapabilityRegistry,
+) -> Result<ComponentSpec> {
+    for capability_name in &definition.capabilities {
+        if capability_registry
+            .get_exposed_runtime_capability(capability_name)
+            .is_none()
+            && capability_registry
+                .get_exposed_component_capability(capability_name)
+                .is_none()
+        {
+            return Err(anyhow::anyhow!(
+                "Tool '{}' requested unavailable capability '{}'",
+                definition.name,
+                capability_name
+            ));
+        }
+    }
+    let component_spec = process_component_core(
+        &definition.name,
+        &definition.uri,
+        &definition.config,
+        &definition.capabilities,
+        capability_registry,
+        true, // is_tool
+    )?;
+    for capability_name in &definition.capabilities {
+        if capability_registry
+            .get_exposed_component_capability(capability_name)
+            .is_some()
+        {
+            println!(
+                "Composed tool '{}' with capability '{capability_name}'",
+                definition.name
+            );
+        }
+    }
+    Ok(component_spec)
+}
+
+fn process_component_core(
+    name: &str,
+    uri: &str,
+    config: &Option<HashMap<String, serde_json::Value>>,
+    capabilities: &[CapabilityName],
+    capability_registry: &CapabilityRegistry,
+    is_tool: bool,
+) -> Result<ComponentSpec> {
+    let component_path = resolve_uri(uri)?;
+    let mut bytes = fs::read(&component_path)?;
+
+    let mut component_imports = Parser::discover_imports(&bytes)
         .map_err(|e| anyhow::anyhow!("Failed to discover component imports: {}", e))?;
 
+    let imports_config = component_imports
+        .iter()
+        .any(|import| import.starts_with("wasi:config/store"));
+
+    if imports_config {
+        let config_to_use = match config {
+            Some(c) => c,
+            None => &HashMap::new(),
+        };
+        bytes = Composer::compose_with_config(&bytes, config_to_use).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to compose {} '{}' with config: {}",
+                if is_tool { "tool" } else { "capability" },
+                name,
+                e
+            )
+        })?;
+        component_imports.retain(|import| !import.starts_with("wasi:config/store"));
+    } else if config.is_some() {
+        println!(
+            "Warning: Config provided for {} '{}' but component doesn't import wasi:config/store",
+            if is_tool { "tool" } else { "capability" },
+            name
+        );
+    }
+
+    validate_imports(
+        &component_imports,
+        capabilities,
+        capability_registry,
+        is_tool,
+    )?;
+
+    let mut remaining_capabilities = Vec::new();
+    let mut all_runtime_capabilities = HashSet::new();
+
+    for capability_name in capabilities {
+        let component_capability = if is_tool {
+            capability_registry.get_exposed_component_capability(capability_name)
+        } else {
+            capability_registry.get_component_capability(capability_name)
+        };
+
+        if let Some(component_capability) = component_capability {
+            bytes = Composer::compose_components(&bytes, &component_capability.component.bytes)
+                .map_err(|e| {
+                    if is_tool {
+                        anyhow::anyhow!(
+                            "Failed to compose tool '{}' with capability '{}': {}",
+                            name,
+                            capability_name,
+                            e
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "Failed to compose capability '{}' with dependency '{}': {}",
+                            name,
+                            capability_name,
+                            e
+                        )
+                    }
+                })?;
+
+            // Merge runtime capabilities from composed dependency capability
+            all_runtime_capabilities.extend(
+                component_capability
+                    .component
+                    .runtime_capabilities
+                    .iter()
+                    .cloned(),
+            );
+        } else {
+            let runtime_capability = if is_tool {
+                capability_registry.get_exposed_runtime_capability(capability_name)
+            } else {
+                capability_registry.get_runtime_capability(capability_name)
+            };
+
+            if runtime_capability.is_some() {
+                // Runtime capability - keep for later linker setup
+                remaining_capabilities.push(capability_name.clone());
+            } else {
+                return Err(anyhow::anyhow!(
+                    "{} '{}' requested unavailable {} '{}'",
+                    if is_tool { "Tool" } else { "Capability" },
+                    name,
+                    if is_tool { "capability" } else { "dependency" },
+                    capability_name
+                ));
+            }
+        }
+    }
+
+    if imports_config {
+        if let Some(config) = config {
+            let config_keys: Vec<_> = config.keys().collect();
+            println!(
+                "Composed {} '{}' with config: {config_keys:?}",
+                if is_tool { "tool" } else { "capability" },
+                name
+            );
+        }
+    }
+
+    // Merge direct runtime capabilities with composed ones
+    all_runtime_capabilities.extend(remaining_capabilities);
+
+    Ok(ComponentSpec {
+        name: name.to_string(),
+        bytes,
+        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
+    })
+}
+
+fn resolve_uri(uri: &str) -> Result<PathBuf> {
+    if let Some(path_str) = uri.strip_prefix("file://") {
+        Ok(PathBuf::from(path_str))
+    } else {
+        Ok(PathBuf::from(uri))
+    }
+}
+
+/// Validate that component only imports interfaces covered by requested capabilities
+fn validate_imports(
+    component_imports: &[String],
+    requested_capabilities: &[CapabilityName],
+    capability_registry: &CapabilityRegistry,
+    is_tool: bool,
+) -> Result<()> {
     let expected_interfaces = get_expected_interfaces_from_capabilities(
         requested_capabilities,
         capability_registry,
@@ -286,7 +773,7 @@ fn validate_imports(
     );
 
     // Check that all component imports are covered by expected interfaces
-    for import in &component_imports {
+    for import in component_imports {
         if !expected_interfaces.contains(import) {
             return Err(anyhow::anyhow!(
                 "Component imports unauthorized interface '{}' - must request appropriate capability",
@@ -325,389 +812,4 @@ fn get_expected_interfaces_from_capabilities(
         }
     }
     interfaces
-}
-
-fn create_capability_registry(
-    resolved_capabilities: &[ResolvedCapability],
-) -> Result<CapabilityRegistry> {
-    let mut builder = CapabilityRegistryBuilder::new();
-
-    for resolved_cap in resolved_capabilities {
-        if resolved_cap.capability.uri.starts_with("wasmtime:") {
-            let interfaces = get_interfaces_for_runtime_capability(&resolved_cap.capability.uri);
-            let runtime_capability = RuntimeCapability {
-                uri: resolved_cap.capability.uri.clone(),
-                exposed: resolved_cap.capability.exposed,
-                interfaces,
-            };
-            builder.add_runtime_capability(resolved_cap.name.clone(), runtime_capability);
-        } else {
-            builder.add_pending_component_capability(
-                resolved_cap.name.clone(),
-                resolved_cap.original_table.clone(),
-            );
-        }
-    }
-    builder.build_registry()
-}
-
-fn resolve_component_capability_from_toml(
-    name: &str,
-    capability_table: &toml::map::Map<String, toml::Value>,
-    capability_registry: &CapabilityRegistry,
-) -> Result<ComponentCapability> {
-    // Extract config subtable if present
-    let config = if let Some(toml::Value::Table(config_table)) = capability_table.get("config") {
-        Some(convert_toml_table_to_json_map(config_table)?)
-    } else {
-        None
-    };
-
-    // Parse capability definition (excluding config subtable)
-    let mut capability_value = capability_table.clone();
-    capability_value.remove("config");
-
-    let capability: Capability = toml::Value::Table(capability_value)
-        .try_into()
-        .map_err(|e| anyhow::anyhow!("Failed to parse capability '{}': {}", name, e))?;
-
-    if capability.uri.starts_with("wasmtime:") {
-        return Err(anyhow::anyhow!(
-            "Wasmtime capability '{}' should not be resolved as component",
-            name
-        ));
-    }
-
-    let component_path = resolve_uri(&capability.uri)?;
-    let mut bytes = fs::read(&component_path)?;
-
-    // Compose if config exists, even if empty (satisfies imports with defaults)
-    if let Some(config) = &config {
-        bytes = Composer::compose_tool_with_config(&bytes, config).map_err(|e| {
-            anyhow::anyhow!("Failed to compose capability '{}' with config: {}", name, e)
-        })?;
-    }
-
-    validate_imports(&bytes, &capability.capabilities, capability_registry, false)?;
-
-    // Compose capability dependencies into this capability component
-    let mut remaining_capabilities = Vec::new();
-    let mut all_runtime_capabilities = HashSet::new();
-
-    for dependency_name in &capability.capabilities {
-        if let Some(dependency_capability) =
-            capability_registry.get_component_capability(dependency_name)
-        {
-            bytes = Composer::compose_components(&bytes, &dependency_capability.component.bytes)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to compose capability '{}' with dependency '{}': {}",
-                        name,
-                        dependency_name,
-                        e
-                    )
-                })?;
-
-            // Merge runtime capabilities from composed dependency capability
-            all_runtime_capabilities.extend(
-                dependency_capability
-                    .component
-                    .runtime_capabilities
-                    .iter()
-                    .cloned(),
-            );
-        } else if capability_registry
-            .get_runtime_capability(dependency_name)
-            .is_some()
-        {
-            // Runtime capability - keep for later linker setup
-            remaining_capabilities.push(dependency_name.clone());
-        } else {
-            return Err(anyhow::anyhow!(
-                "Capability '{}' requested unavailable dependency '{}'",
-                name,
-                dependency_name
-            ));
-        }
-    }
-
-    // Merge capability's direct runtime capabilities with those from composed dependencies
-    all_runtime_capabilities.extend(remaining_capabilities);
-
-    let exports = Parser::discover_exports(&bytes).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to discover exports for capability '{}': {}",
-            name,
-            e
-        )
-    })?;
-
-    // Log successful composition operations
-    if let Some(config) = &config {
-        let config_keys: Vec<_> = config.keys().collect();
-        println!("Composed capability '{name}' with config: {config_keys:?}");
-    }
-
-    for dependency_name in &capability.capabilities {
-        if capability_registry
-            .get_component_capability(dependency_name)
-            .is_some()
-        {
-            println!("Composed capability '{name}' with dependency '{dependency_name}'");
-        }
-    }
-
-    let component_spec = ComponentSpec {
-        name: name.to_string(),
-        bytes,
-        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
-    };
-
-    Ok(ComponentCapability {
-        component: component_spec,
-        exposed: capability.exposed,
-        exports,
-    })
-}
-
-fn resolve_wasm_file(path: &PathBuf) -> Result<ComponentSpec> {
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "Cannot extract component name from path: {}",
-                path.display()
-            )
-        })?
-        .to_string();
-    let bytes = fs::read(path)?;
-
-    // Direct .wasm files should be self-contained components only
-    let component_imports = Parser::discover_imports(&bytes).map_err(|e| {
-        anyhow::anyhow!("Failed to discover component imports for '{}': {}", name, e)
-    })?;
-
-    if !component_imports.is_empty() {
-        return Err(anyhow::anyhow!(
-            "Loaded .wasm directly with unsatisfied imports: {:?}. Use .toml to specify required capabilities.",
-            component_imports
-        ));
-    }
-
-    Ok(ComponentSpec {
-        name,
-        bytes,
-        runtime_capabilities: Vec::new(),
-    })
-}
-
-fn resolve_tool_toml_file(
-    path: &PathBuf,
-    capability_registry: &CapabilityRegistry,
-) -> Result<Vec<ComponentSpec>> {
-    let content = fs::read_to_string(path)?;
-    let toml_doc: toml::Value = toml::from_str(&content)?;
-
-    let (tools, configs) = extract_tools_and_configs(&toml_doc)?;
-
-    let mut specs = Vec::new();
-    for (name, tool_definition) in tools {
-        let config = configs.get(&name).cloned();
-        match resolve_tool(&name, tool_definition, config, capability_registry) {
-            Ok(spec) => {
-                specs.push(spec);
-            }
-            Err(e) => {
-                eprintln!("Warning: Skipping tool '{name}' due to error: {e}");
-                continue;
-            }
-        }
-    }
-    Ok(specs)
-}
-
-fn resolve_tool(
-    name: &str,
-    tool_definition: ToolDefinition,
-    config: Option<HashMap<String, serde_json::Value>>,
-    capability_registry: &CapabilityRegistry,
-) -> Result<ComponentSpec> {
-    let component_path = resolve_uri(&tool_definition.uri)?;
-    let mut bytes = fs::read(&component_path)?;
-
-    // Check if all requested capabilities exist before doing import validation
-    for capability_name in &tool_definition.capabilities {
-        if capability_registry
-            .get_exposed_runtime_capability(capability_name)
-            .is_none()
-            && capability_registry
-                .get_exposed_component_capability(capability_name)
-                .is_none()
-        {
-            return Err(anyhow::anyhow!(
-                "Tool '{}' requested unavailable capability '{}'",
-                name,
-                capability_name
-            ));
-        }
-    }
-
-    // Compose if config exists, even if empty (satisfies imports with defaults)
-    if let Some(config) = &config {
-        bytes = Composer::compose_tool_with_config(&bytes, config)
-            .map_err(|e| anyhow::anyhow!("Failed to compose {} with config: {}", name, e))?;
-    }
-
-    // Validate imports after config composition (config provides wasi:config/store interfaces)
-    validate_imports(
-        &bytes,
-        &tool_definition.capabilities,
-        capability_registry,
-        true,
-    )?;
-
-    // Compose with component capabilities
-    let mut remaining_capabilities = Vec::new();
-    let mut all_runtime_capabilities = HashSet::new();
-
-    for capability_name in &tool_definition.capabilities {
-        if let Some(component_capability) =
-            capability_registry.get_exposed_component_capability(capability_name)
-        {
-            bytes = Composer::compose_components(&bytes, &component_capability.component.bytes)
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to compose tool '{}' with capability '{}': {}",
-                        name,
-                        capability_name,
-                        e
-                    )
-                })?;
-
-            // Merge runtime capabilities from composed component capability
-            all_runtime_capabilities.extend(
-                component_capability
-                    .component
-                    .runtime_capabilities
-                    .iter()
-                    .cloned(),
-            );
-        } else if capability_registry
-            .get_exposed_runtime_capability(capability_name)
-            .is_some()
-        {
-            // Runtime capability - keep for later linker setup
-            remaining_capabilities.push(capability_name.clone());
-        } else {
-            return Err(anyhow::anyhow!(
-                "Tool '{}' requested unavailable capability '{}'",
-                name,
-                capability_name
-            ));
-        }
-    }
-
-    // Merge tool's direct runtime capabilities with those from composed capabilities
-    all_runtime_capabilities.extend(remaining_capabilities);
-
-    // Log successful composition operations
-    if let Some(config) = &config {
-        let config_keys: Vec<_> = config.keys().collect();
-        println!("Composed tool '{name}' with config: {config_keys:?}");
-    }
-
-    for capability_name in &tool_definition.capabilities {
-        if capability_registry
-            .get_exposed_component_capability(capability_name)
-            .is_some()
-        {
-            println!("Composed tool '{name}' with capability '{capability_name}'");
-        }
-    }
-
-    Ok(ComponentSpec {
-        name: name.to_string(),
-        bytes,
-        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
-    })
-}
-
-fn extract_tools_and_configs(toml_doc: &toml::Value) -> Result<ToolsAndConfigs> {
-    let mut tools = HashMap::new();
-    let mut configs = HashMap::new();
-
-    if let toml::Value::Table(table) = toml_doc {
-        for (key, value) in table {
-            if let toml::Value::Table(tool_table) = value {
-                // Check if this tool has a "config" subtable
-                if let Some(toml::Value::Table(config_table)) = tool_table.get("config") {
-                    let config_map = convert_toml_table_to_json_map(config_table)?;
-                    configs.insert(key.clone(), config_map);
-                }
-
-                // Parse the tool definition (excluding the config subtable)
-                let mut tool_value = tool_table.clone();
-                tool_value.remove("config"); // Remove config before parsing as ToolDefinition
-                let tool_definition: ToolDefinition = toml::Value::Table(tool_value)
-                    .try_into()
-                    .map_err(|e| anyhow::anyhow!("Failed to parse tool '{}': {}", key, e))?;
-                tools.insert(key.clone(), tool_definition);
-            }
-        }
-    }
-    Ok((tools, configs))
-}
-
-fn convert_toml_table_to_json_map(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<HashMap<String, serde_json::Value>> {
-    let mut map = HashMap::new();
-    for (key, value) in table {
-        let json_value = convert_toml_value_to_json(value)?;
-        map.insert(key.clone(), json_value);
-    }
-    Ok(map)
-}
-
-fn convert_toml_value_to_json(value: &toml::Value) -> Result<serde_json::Value> {
-    match value {
-        toml::Value::String(s) => Ok(serde_json::Value::String(s.clone())),
-        toml::Value::Integer(i) => Ok(serde_json::Value::Number((*i).into())),
-        toml::Value::Float(f) => Ok(serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)),
-        toml::Value::Boolean(b) => Ok(serde_json::Value::Bool(*b)),
-        toml::Value::Array(arr) => {
-            let json_arr: Result<Vec<_>, _> = arr.iter().map(convert_toml_value_to_json).collect();
-            Ok(serde_json::Value::Array(json_arr?))
-        }
-        toml::Value::Table(table) => {
-            let json_map = convert_toml_table_to_json_map(table)?;
-            let json_obj: serde_json::Map<String, serde_json::Value> =
-                json_map.into_iter().collect();
-            Ok(serde_json::Value::Object(json_obj))
-        }
-        toml::Value::Datetime(dt) => Ok(serde_json::Value::String(dt.to_string())),
-    }
-}
-
-fn resolve_directory(dir_path: &PathBuf) -> Result<Vec<ComponentSpec>> {
-    let mut specs = Vec::new();
-    for entry in fs::read_dir(dir_path)? {
-        let entry_path = entry?.path();
-        if entry_path.is_file() && entry_path.extension().and_then(|s| s.to_str()) == Some("wasm") {
-            let spec = resolve_wasm_file(&entry_path)?;
-            specs.push(spec);
-        }
-    }
-    Ok(specs)
-}
-
-fn resolve_uri(uri: &str) -> Result<PathBuf> {
-    if let Some(path_str) = uri.strip_prefix("file://") {
-        Ok(PathBuf::from(path_str))
-    } else {
-        Ok(PathBuf::from(uri))
-    }
 }

@@ -10,8 +10,7 @@ mod interfaces;
 mod resolver;
 mod server;
 
-use capabilities::CapabilityRegistry;
-use resolver::{resolve_capabilities, resolve_tools};
+use resolver::build_registries;
 use server::ComponentServer;
 
 #[derive(Parser)]
@@ -26,20 +25,23 @@ struct Cli {
     #[arg(short, long, default_value_t = 3001)]
     port: u16,
 
-    /// Component paths (.wasm files, .toml config files, or directories)
+    /// Capability definition files (.toml files with [capabilityname] sections)
     #[arg(
-        required = true,
-        help = "Wasm component paths, TOML config files, or directories"
+        short = 'c',
+        long = "capabilities",
+        help = "Capability definition files"
     )]
-    components: Vec<PathBuf>,
+    capabilities: Vec<PathBuf>,
 
-    /// Optional server configuration file
+    /// Tool definition files (.toml files with [toolname] sections)
+    #[arg(short = 't', long = "tools", help = "Tool definition files")]
+    tools: Vec<PathBuf>,
+
+    /// Multi-definition files and standalone .wasm files
     #[arg(
-        short = 's',
-        long = "server-config",
-        help = "Server configuration file (.toml)"
+        help = "Multi-definition files (.toml with [capabilities.*] and [tools.*]) and standalone .wasm files"
     )]
-    server_config: Option<PathBuf>,
+    definitions_and_wasm: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -48,14 +50,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
-    let capability_registry = if let Some(server_config_path) = &cli.server_config {
-        resolve_capabilities(server_config_path)?
-    } else {
-        CapabilityRegistry::empty() // Empty registry - no capabilities available
-    };
+    let (capability_registry, tool_registry) =
+        build_registries(&cli.capabilities, &cli.tools, &cli.definitions_and_wasm)?;
 
-    let component_specs = resolve_tools(&cli.components, &capability_registry)?;
-    let server = ComponentServer::new(component_specs, capability_registry)?;
+    let server = ComponentServer::new(capability_registry, tool_registry)?;
     server.run(addr).await?;
     Ok(())
 }
