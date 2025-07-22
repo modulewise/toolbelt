@@ -1,4 +1,4 @@
-use crate::capabilities::CapabilityRegistry;
+use crate::registry::{CapabilityName, CapabilityRegistry};
 use anyhow::Result;
 use wasmtime::{
     Cache, Config, Engine, Store,
@@ -9,22 +9,6 @@ use wasmtime_wasi::{
     p2::{IoView, WasiCtx, WasiCtxBuilder, WasiView},
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
-
-pub use crate::capabilities::CapabilityName;
-
-#[derive(Debug, Clone)]
-pub struct ComponentSpec {
-    pub name: String,
-    pub bytes: Vec<u8>,
-    pub runtime_capabilities: Vec<CapabilityName>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ComponentCapability {
-    pub component: ComponentSpec,
-    pub exposed: bool,
-    pub exports: Vec<String>, // Interfaces this component capability provides
-}
 
 pub struct ComponentState {
     pub wasi_ctx: WasiCtx,
