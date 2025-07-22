@@ -6,12 +6,27 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that e
 
 (auth, observability, and OCI support are on the roadmap)
 
+## Build
+
+Prerequisite: a current [rust toolchain](https://www.rust-lang.org/tools/install)
+
+Clone the [toolbelt](https://github.com/modulewise/toolbelt) project if you have not already.
+
+Then from within the `toolbelt` directory:
+
+```
+cargo install --path .
+```
+
+That will build the binary with the `release` profile and add
+it to your cargo bin directory which should be on your PATH.
+
 ## Run
 
 One or more `.wasm` files may be provided as command line arguments (see [example-components](https://github.com/modulewise/example-components)):
 
 ```sh
-cargo run -- hello.wasm calculator.wasm
+toolbelt hello.wasm calculator.wasm
 ```
 
 By default, components operate in a least-privilege capability mode.
