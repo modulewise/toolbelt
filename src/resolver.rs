@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::capabilities::{Capability, CapabilityRegistry, RuntimeCapability};
+use crate::capabilities::{CapabilityRegistry, RuntimeCapability};
 use crate::components::{CapabilityName, ComponentCapability, ComponentSpec};
 use crate::composer::Composer;
 use crate::interfaces::Parser;
@@ -123,22 +123,41 @@ impl CapabilityRegistryBuilder {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct CapabilityDefinition {
-    name: String,
+struct ComponentDefinition {
     uri: String,
     config: Option<HashMap<String, serde_json::Value>>,
     #[serde(default)]
     capabilities: Vec<CapabilityName>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CapabilityDefinition {
+    name: String,
+    #[serde(flatten)]
+    base: ComponentDefinition,
+    #[serde(default)]
     exposed: bool,
+}
+
+impl std::ops::Deref for CapabilityDefinition {
+    type Target = ComponentDefinition;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ToolDefinition {
     name: String,
-    uri: String,
-    config: Option<HashMap<String, serde_json::Value>>,
-    #[serde(default)]
-    capabilities: Vec<CapabilityName>,
+    #[serde(flatten)]
+    base: ComponentDefinition,
+}
+
+impl std::ops::Deref for ToolDefinition {
+    type Target = ComponentDefinition;
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
 }
 
 pub fn build_registries(
@@ -312,7 +331,11 @@ fn parse_tools_from_toml(tools_section: &toml::Value) -> Result<Vec<ToolDefiniti
     if let toml::Value::Table(table) = tools_section {
         for (name, value) in table {
             if let toml::Value::Table(tool_table) = value {
-                let definition = parse_tool_toml_table(name, tool_table)?;
+                let component = parse_component_toml_table(name, tool_table)?;
+                let definition = ToolDefinition {
+                    name: name.to_string(),
+                    base: component,
+                };
                 definitions.push(definition);
             }
         }
@@ -324,50 +347,33 @@ fn parse_capability_toml_table(
     name: &str,
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<CapabilityDefinition> {
-    let (name, uri, config, capabilities, exposed) = parse_component_toml_table(name, table)?;
-    Ok(create_capability_definition(
-        name,
-        uri,
-        config,
-        capabilities,
+    let component = parse_component_toml_table(name, table)?;
+    let exposed = table
+        .get("exposed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Ok(CapabilityDefinition {
+        name: name.to_string(),
+        base: component,
         exposed,
-    ))
-}
-
-fn parse_tool_toml_table(
-    name: &str,
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<ToolDefinition> {
-    let (name, uri, config, capabilities, exposed) = parse_component_toml_table(name, table)?;
-    create_tool_definition(name, uri, config, capabilities, exposed)
+    })
 }
 
 fn parse_component_toml_table(
     name: &str,
     table: &toml::map::Map<String, toml::Value>,
-) -> Result<(
-    String,
-    String,
-    Option<HashMap<String, serde_json::Value>>,
-    Vec<CapabilityName>,
-    bool,
-)> {
+) -> Result<ComponentDefinition> {
     let config = extract_config_from_table(table);
 
     let mut definition_value = table.clone();
     definition_value.remove("config");
 
-    let capability: Capability = toml::Value::Table(definition_value)
+    let mut component: ComponentDefinition = toml::Value::Table(definition_value)
         .try_into()
         .map_err(|e| anyhow::anyhow!("Failed to parse component '{}': {}", name, e))?;
 
-    Ok((
-        name.to_string(),
-        capability.uri,
-        config,
-        capability.capabilities,
-        capability.exposed,
-    ))
+    component.config = config;
+    Ok(component)
 }
 
 fn extract_config_from_table(
@@ -413,40 +419,6 @@ fn convert_toml_value_to_json(value: &toml::Value) -> Result<serde_json::Value> 
     }
 }
 
-fn create_capability_definition(
-    name: String,
-    uri: String,
-    config: Option<HashMap<String, serde_json::Value>>,
-    capabilities: Vec<CapabilityName>,
-    exposed: bool,
-) -> CapabilityDefinition {
-    CapabilityDefinition {
-        name,
-        uri,
-        config,
-        capabilities,
-        exposed,
-    }
-}
-
-fn create_tool_definition(
-    name: String,
-    uri: String,
-    config: Option<HashMap<String, serde_json::Value>>,
-    capabilities: Vec<CapabilityName>,
-    exposed: bool,
-) -> Result<ToolDefinition> {
-    if exposed {
-        return Err(anyhow::anyhow!("Tool '{}' cannot have exposed=true", name));
-    }
-    Ok(ToolDefinition {
-        name,
-        uri,
-        config,
-        capabilities,
-    })
-}
-
 fn create_implicit_tool_definitions(wasm_files: &[PathBuf]) -> Result<Vec<ToolDefinition>> {
     let mut definitions = Vec::new();
     for path in wasm_files {
@@ -462,9 +434,11 @@ fn create_implicit_tool_definitions(wasm_files: &[PathBuf]) -> Result<Vec<ToolDe
             .to_string();
         let definition = ToolDefinition {
             name,
-            uri: path.to_string_lossy().to_string(),
-            config: None,
-            capabilities: Vec::new(),
+            base: ComponentDefinition {
+                uri: path.to_string_lossy().to_string(),
+                config: None,
+                capabilities: Vec::new(),
+            },
         };
         definitions.push(definition);
     }
@@ -479,11 +453,11 @@ fn create_capability_registry(
         if def.uri.starts_with("wasmtime:") {
             let interfaces = get_interfaces_for_runtime_capability(&def.uri);
             let runtime_capability = RuntimeCapability {
-                uri: def.uri,
+                uri: def.uri.clone(),
                 exposed: def.exposed,
                 interfaces,
             };
-            builder.add_runtime_capability(def.name, runtime_capability);
+            builder.add_runtime_capability(def.name.clone(), runtime_capability);
         } else {
             builder.add_pending_component_capability_definition(def);
         }
