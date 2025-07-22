@@ -37,7 +37,7 @@ And then define the tool component in its own `.toml` file:
 ```toml
 [flights]
 uri = "file:///path/to/flight-search.wasm"
-capabilities = ["wasip2", http"]
+capabilities = ["wasip2", "http"]
 ```
 
 Pass the capability and tool files to the server instead of direct `.wasm` files:
@@ -60,7 +60,7 @@ Wasm Components can also be registered as capabilities, and they may have their 
 uri = "wasmtime:wasip2"
 
 [inherit-network]
-uri="wasmtime:inherit-network"
+uri = "wasmtime:inherit-network"
 ```
 
 Those runtime capabilities are then required by a component capability:
@@ -92,7 +92,7 @@ toolbelt -c runtime-capabilities.toml -c keyvalue.toml -t incrementor.toml
 ```
 
 This allows for various combinations of reusable capability sets and tool sets.
-It also provides encapsulation and promotes separation of concerns.
+It also promotes separation of concerns.
 
 ## Test with MCP Inspector
 
@@ -100,9 +100,9 @@ It also provides encapsulation and promotes separation of concerns.
 
 2. Start the [MCP Inspector](https://github.com/modelcontextprotocol/inspector?tab=readme-ov-file#quick-start-ui-mode).
 
-3. Ensure the `SSE` Transport Type is selected.
+3. Ensure the `Streamable HTTP` Transport Type is selected.
 
-4. Ensure the specified URL is `http://127.0.0.1:3001/sse` (or replace host and port if not using defaults).
+4. Ensure the specified URL is `http://127.0.0.1:3001/mcp` (replace host or port if not using defaults).
 
 5. Click `Connect` and then `List Tools`.
 
