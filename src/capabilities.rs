@@ -18,7 +18,6 @@ pub struct CapabilityRegistry {
     pub component_capabilities: HashMap<String, ComponentCapability>,
 }
 
-
 impl CapabilityRegistry {
     /// Create a new registry from resolved capability maps
     pub fn new(
