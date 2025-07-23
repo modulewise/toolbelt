@@ -11,10 +11,11 @@ use rmcp::{
 };
 use std::net::SocketAddr;
 
-use crate::capabilities::CapabilityRegistry;
-use crate::components::{ComponentSpec, Invoker};
 use crate::interfaces::{ComponentTool, Parser};
-use crate::resolver::ToolRegistry;
+use crate::registry::CapabilityRegistry;
+use crate::registry::ComponentSpec;
+use crate::registry::ToolRegistry;
+use crate::runtime::Invoker;
 
 #[derive(Clone)]
 pub struct ComponentServer {

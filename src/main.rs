@@ -3,14 +3,15 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-mod capabilities;
-mod components;
 mod composer;
 mod interfaces;
-mod resolver;
+mod loader;
+mod registry;
+mod runtime;
 mod server;
 
-use resolver::build_registries;
+use loader::load_definitions;
+use registry::build_registries;
 use server::ComponentServer;
 
 #[derive(Parser)]
@@ -50,8 +51,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
+    let (capability_definitions, tool_definitions) =
+        load_definitions(&cli.capabilities, &cli.tools, &cli.definitions_and_wasm)?;
     let (capability_registry, tool_registry) =
-        build_registries(&cli.capabilities, &cli.tools, &cli.definitions_and_wasm)?;
+        build_registries(capability_definitions, tool_definitions)?;
 
     let server = ComponentServer::new(capability_registry, tool_registry)?;
     server.run(addr).await?;
