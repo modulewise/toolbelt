@@ -11,11 +11,11 @@ use rmcp::{
 };
 use std::net::SocketAddr;
 
-use crate::interfaces::{ComponentTool, Parser};
 use crate::registry::CapabilityRegistry;
 use crate::registry::ComponentSpec;
 use crate::registry::ToolRegistry;
 use crate::runtime::Invoker;
+use crate::wit::{ComponentTool, Function, Interface, Parser};
 
 #[derive(Clone)]
 pub struct ComponentServer {
@@ -106,17 +106,26 @@ impl ComponentServer {
             }
         }
 
+        // Build the interface string from tool components
+        let interface_str = if let Some(ref version) = tool.version {
+            format!(
+                "{}:{}/{}@{}",
+                tool.namespace, tool.package, tool.interface, version
+            )
+        } else {
+            format!("{}:{}/{}", tool.namespace, tool.package, tool.interface)
+        };
+
+        let interface = Interface::parse(&interface_str)?;
+        let function = Function::new(interface, tool.function.clone());
+
         match self
             .invoker
             .invoke(
                 &tool.bytes,
                 &spec.runtime_capabilities,
                 &self.capability_registry,
-                tool.namespace.clone(),
-                tool.package.clone(),
-                tool.version.clone(),
-                tool.interface.clone(),
-                tool.function.clone(),
+                function,
                 json_args,
             )
             .await

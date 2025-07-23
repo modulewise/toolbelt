@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::composer::Composer;
-use crate::interfaces::Parser;
 use crate::loader::{CapabilityDefinition, CapabilityName, ToolDefinition};
+use crate::wit::Parser;
 use std::fs;
 use std::path::PathBuf;
 

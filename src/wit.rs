@@ -1,9 +1,119 @@
 use anyhow::Result;
 use rmcp::model::Tool;
 use serde_json::json;
+use std::fmt;
 use wit_parser::{Resolve, Type};
 
 pub struct Parser;
+
+#[derive(Debug, Clone, Copy)]
+enum WorldItemType {
+    Exports,
+    Imports,
+}
+
+/// A validated WebAssembly Interface Type (WIT) interface name
+/// Format: namespace:package/interface[@version]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Interface {
+    namespace: String,
+    package: String,
+    interface: String,
+    version: Option<String>,
+    full_name: String,
+}
+
+impl Interface {
+    /// Parse and validate a WIT interface string
+    pub fn parse(s: &str) -> Result<Self> {
+        if let Some((namespace, rest)) = s.split_once(':') {
+            if let Some((package, after_slash)) = rest.split_once('/') {
+                let (interface, version) = if let Some((i, v)) = after_slash.split_once('@') {
+                    (i, Some(v.to_string()))
+                } else {
+                    (after_slash, None)
+                };
+
+                return Ok(Self {
+                    namespace: namespace.to_string(),
+                    package: package.to_string(),
+                    interface: interface.to_string(),
+                    version,
+                    full_name: s.to_string(),
+                });
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Invalid WIT interface format: expected namespace:package/interface[@version], got: {}",
+            s
+        ))
+    }
+
+    /// Get the full interface string
+    pub fn as_str(&self) -> &str {
+        &self.full_name
+    }
+
+    /// Get the namespace (e.g., "wasi" from "wasi:http/outgoing-handler@0.2.3")
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// Get the package (e.g., "http" from "wasi:http/outgoing-handler@0.2.3")
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+
+    /// Get the interface name (e.g., "outgoing-handler" from "wasi:http/outgoing-handler@0.2.3")
+    pub fn interface_name(&self) -> &str {
+        &self.interface
+    }
+
+    /// Get the version (e.g., Some("0.2.3") from "wasi:http/outgoing-handler@0.2.3")
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+}
+
+impl fmt::Display for Interface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.full_name)
+    }
+}
+
+/// A WebAssembly function call specification
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Function {
+    interface: Interface,
+    function: String,
+}
+
+impl Function {
+    /// Create a new WIT function specification
+    pub fn new(interface: Interface, function: String) -> Self {
+        Self {
+            interface,
+            function,
+        }
+    }
+
+    /// Get the interface
+    pub fn interface(&self) -> &Interface {
+        &self.interface
+    }
+
+    /// Get the function name
+    pub fn function_name(&self) -> &str {
+        &self.function
+    }
+}
+
+impl fmt::Display for Function {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}#{}", self.interface, self.function)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ComponentTool {
@@ -11,7 +121,7 @@ pub struct ComponentTool {
     pub bytes: Vec<u8>,
     pub namespace: String,
     pub package: String,
-    pub version: String,
+    pub version: Option<String>,
     pub interface: String,
     pub function: String,
     pub params: Vec<FunctionParam>,
@@ -22,7 +132,7 @@ struct ComponentFunction {
     pub component: String,
     pub namespace: String,
     pub package: String,
-    pub version: String,
+    pub version: Option<String>,
     pub interface: String,
     pub function: String,
     pub docs: String,
@@ -70,51 +180,19 @@ impl Parser {
     /// Discover interface exports from a component
     /// Returns a list of full interface names (e.g., "wasi:keyvalue/store@0.2.0")
     pub fn discover_exports(component_bytes: &[u8]) -> Result<Vec<String>> {
-        let decoded = wit_parser::decoding::decode(component_bytes)?;
-        let resolve = decoded.resolve().clone();
-
-        if resolve.worlds.len() != 1 {
-            return Err(anyhow::anyhow!("Expected exactly one world in component"));
-        }
-
-        let mut exports = Vec::new();
-        let (_, world) = resolve.worlds.iter().next().unwrap();
-
-        for (_, item) in &world.exports {
-            if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
-                let interface = resolve.interfaces.get(*id).unwrap();
-                if let Some(interface_name) = &interface.name {
-                    if let Some(package_id) = &interface.package {
-                        let package = resolve.packages.get(*package_id).unwrap();
-                        let package_name = &package.name;
-                        let version_suffix = package_name
-                            .version
-                            .as_ref()
-                            .map(|v| format!("@{v}"))
-                            .unwrap_or_default();
-                        let full_interface_name = format!(
-                            "{}:{}/{}{}",
-                            package_name.namespace,
-                            package_name.name,
-                            interface_name,
-                            version_suffix
-                        );
-                        exports.push(full_interface_name);
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Interface '{}' missing required package metadata",
-                            interface_name
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(exports)
+        Self::discover_interfaces(component_bytes, WorldItemType::Exports)
     }
 
     /// Discover interface imports from a component
     /// Returns a list of full interface names (e.g., "wasi:http/outgoing-handler@0.2.0")
     pub fn discover_imports(component_bytes: &[u8]) -> Result<Vec<String>> {
+        Self::discover_interfaces(component_bytes, WorldItemType::Imports)
+    }
+
+    fn discover_interfaces(
+        component_bytes: &[u8],
+        item_type: WorldItemType,
+    ) -> Result<Vec<String>> {
         let decoded = wit_parser::decoding::decode(component_bytes)?;
         let resolve = decoded.resolve().clone();
 
@@ -122,39 +200,51 @@ impl Parser {
             return Err(anyhow::anyhow!("Expected exactly one world in component"));
         }
 
-        let mut imports = Vec::new();
+        let mut interfaces = Vec::new();
         let (_, world) = resolve.worlds.iter().next().unwrap();
 
-        for (_, item) in &world.imports {
+        let world_items = match item_type {
+            WorldItemType::Exports => &world.exports,
+            WorldItemType::Imports => &world.imports,
+        };
+
+        for (_, item) in world_items {
             if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
-                let interface = resolve.interfaces.get(*id).unwrap();
-                if let Some(interface_name) = &interface.name {
-                    if let Some(package_id) = &interface.package {
-                        let package = resolve.packages.get(*package_id).unwrap();
-                        let package_name = &package.name;
-                        let version_suffix = package_name
-                            .version
-                            .as_ref()
-                            .map(|v| format!("@{v}"))
-                            .unwrap_or_default();
-                        let full_interface_name = format!(
-                            "{}:{}/{}{}",
-                            package_name.namespace,
-                            package_name.name,
-                            interface_name,
-                            version_suffix
-                        );
-                        imports.push(full_interface_name);
-                    } else {
-                        return Err(anyhow::anyhow!(
-                            "Interface '{}' missing required package metadata",
-                            interface_name
-                        ));
-                    }
-                }
+                let interface_name = Self::build_full_interface_name(&resolve, *id)?;
+                interfaces.push(interface_name);
             }
         }
-        Ok(imports)
+        Ok(interfaces)
+    }
+
+    fn build_full_interface_name(
+        resolve: &wit_parser::Resolve,
+        interface_id: wit_parser::InterfaceId,
+    ) -> Result<String> {
+        let interface = resolve.interfaces.get(interface_id).unwrap();
+        if let Some(interface_name) = &interface.name {
+            if let Some(package_id) = &interface.package {
+                let package = resolve.packages.get(*package_id).unwrap();
+                let package_name = &package.name;
+                let version_suffix = package_name
+                    .version
+                    .as_ref()
+                    .map(|v| format!("@{v}"))
+                    .unwrap_or_default();
+                let full_interface_name = format!(
+                    "{}:{}/{}{}",
+                    package_name.namespace, package_name.name, interface_name, version_suffix
+                );
+                Ok(full_interface_name)
+            } else {
+                Err(anyhow::anyhow!(
+                    "Interface '{}' missing required package metadata",
+                    interface_name
+                ))
+            }
+        } else {
+            Err(anyhow::anyhow!("Interface missing name"))
+        }
     }
 
     fn parse_interface(
@@ -175,11 +265,7 @@ impl Parser {
             (
                 package_name.namespace.clone(),
                 package_name.name.clone(),
-                package_name
-                    .version
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
+                package_name.version.as_ref().map(|v| v.to_string()),
             )
         } else {
             return Err(anyhow::anyhow!(

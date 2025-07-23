@@ -4,11 +4,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 mod composer;
-mod interfaces;
 mod loader;
 mod registry;
 mod runtime;
 mod server;
+mod wit;
 
 use loader::load_definitions;
 use registry::build_registries;
