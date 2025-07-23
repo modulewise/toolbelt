@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::registry::CapabilityName;
+pub type CapabilityName = String;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ComponentDefinition {
@@ -240,10 +240,12 @@ fn parse_component_toml_table(
     name: &str,
     table: &toml::map::Map<String, toml::Value>,
 ) -> Result<ComponentDefinition> {
-    let config = extract_config_from_table(table);
-
     let mut definition_value = table.clone();
-    definition_value.remove("config");
+    let config = if let Some(toml::Value::Table(config_table)) = definition_value.remove("config") {
+        Some(convert_toml_table_to_json_map(&config_table)?)
+    } else {
+        None
+    };
 
     let mut component: ComponentDefinition = toml::Value::Table(definition_value)
         .try_into()
@@ -251,16 +253,6 @@ fn parse_component_toml_table(
 
     component.config = config;
     Ok(component)
-}
-
-fn extract_config_from_table(
-    table: &toml::map::Map<String, toml::Value>,
-) -> Option<HashMap<String, serde_json::Value>> {
-    if let Some(toml::Value::Table(config_table)) = table.get("config") {
-        Some(convert_toml_table_to_json_map(config_table).unwrap())
-    } else {
-        None
-    }
 }
 
 fn convert_toml_table_to_json_map(

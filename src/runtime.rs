@@ -1,4 +1,5 @@
-use crate::registry::{CapabilityName, CapabilityRegistry};
+use crate::loader::CapabilityName;
+use crate::registry::CapabilityRegistry;
 use anyhow::Result;
 use wasmtime::{
     Cache, Config, Engine, Store,

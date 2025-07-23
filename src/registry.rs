@@ -4,11 +4,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::composer::Composer;
 use crate::interfaces::Parser;
-use crate::loader::{CapabilityDefinition, ToolDefinition};
+use crate::loader::{CapabilityDefinition, CapabilityName, ToolDefinition};
 use std::fs;
 use std::path::PathBuf;
-
-pub type CapabilityName = String;
 
 #[derive(Debug, Clone)]
 pub struct ComponentSpec {
@@ -88,7 +86,7 @@ impl Default for CapabilityRegistry {
 /// Tool registry type alias - contains tool component specifications
 pub type ToolRegistry = HashMap<String, ComponentSpec>;
 
-// Build registries from definitions
+/// Build registries from definitions
 pub fn build_registries(
     capability_definitions: Vec<CapabilityDefinition>,
     tool_definitions: Vec<ToolDefinition>,
