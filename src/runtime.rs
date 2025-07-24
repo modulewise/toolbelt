@@ -1,5 +1,6 @@
 use crate::loader::CapabilityName;
 use crate::registry::CapabilityRegistry;
+use crate::wit::Function;
 use anyhow::Result;
 use wasmtime::{
     Cache, Config, Engine, Store,
@@ -98,17 +99,13 @@ impl Invoker {
         bytes: &[u8],
         capabilities: &[CapabilityName],
         capability_registry: &CapabilityRegistry,
-        namespace: String,
-        package: String,
-        version: String,
-        interface: String,
-        function: String,
+        function: Function,
         args: Vec<serde_json::Value>,
     ) -> Result<serde_json::Value> {
         let component_bytes = bytes.to_vec();
 
-        let version_delim = if version.is_empty() { "" } else { "@" };
-        let interface = format!("{namespace}:{package}/{interface}{version_delim}{version}");
+        let interface_str = function.interface().as_str();
+        let function_name = function.function_name();
         let linker = self.create_linker(capabilities, capability_registry)?;
         let mut wasi_builder = WasiCtxBuilder::new();
 
@@ -159,21 +156,21 @@ impl Invoker {
         let instance = linker.instantiate_async(&mut store, &component).await?;
 
         let interface_export = instance
-            .get_export(&mut store, None, &interface)
-            .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", interface))?;
+            .get_export(&mut store, None, interface_str)
+            .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", interface_str))?;
         let parent_export_idx = Some(&interface_export.1);
         let func_export = instance
-            .get_export(&mut store, parent_export_idx, &function)
+            .get_export(&mut store, parent_export_idx, function_name)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "Function '{}' not found in interface '{}'",
-                    function,
-                    interface
+                    function_name,
+                    interface_str
                 )
             })?;
         let func = instance
             .get_func(&mut store, func_export.1)
-            .ok_or_else(|| anyhow::anyhow!("Function handle invalid for '{}'", function))?;
+            .ok_or_else(|| anyhow::anyhow!("Function handle invalid for '{}'", function_name))?;
 
         let mut arg_vals: Vec<Val> = vec![];
         let params = func.params(&store).clone();

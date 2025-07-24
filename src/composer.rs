@@ -6,6 +6,7 @@ use wac_types::Package;
 pub struct Composer;
 
 impl Composer {
+    /// Compose a component with a wasi:config/store generated from the provided config
     pub fn compose_with_config(
         component_bytes: &[u8],
         config: &HashMap<String, serde_json::Value>,
@@ -41,7 +42,7 @@ impl Composer {
     }
 }
 
-/// Generate a wasi:config/store component from key/value configuration
+// Generate a wasi:config/store component from key/value configuration
 fn create_config_component(config: &HashMap<String, serde_json::Value>) -> Result<Vec<u8>> {
     let mut config_properties = Vec::new();
     for (key, value) in config {

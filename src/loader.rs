@@ -44,6 +44,10 @@ impl std::ops::Deref for ToolDefinition {
     }
 }
 
+/// Load capability and tool definitions from configuration files
+///
+/// Processes capability files (.toml), tool files (.toml), and mixed definition files
+/// (.toml and .wasm) to extract component definitions.
 pub fn load_definitions(
     capability_files: &[PathBuf],
     tool_files: &[PathBuf],
