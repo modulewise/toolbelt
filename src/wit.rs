@@ -1,15 +1,10 @@
 use anyhow::Result;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fmt;
 use wit_parser::{Resolve, Type};
 
 pub struct Parser;
-
-#[derive(Debug, Clone, Copy)]
-enum WorldItemType {
-    Exports,
-    Imports,
-}
 
 /// A validated WebAssembly Interface Type (WIT) interface name
 /// Format: namespace:package/interface[@version]
@@ -88,7 +83,7 @@ pub struct Function {
     function_name: String,
     docs: String,
     params: Vec<FunctionParam>,
-    returns: Vec<Type>,
+    result: Option<serde_json::Value>,
 }
 
 impl Function {
@@ -98,14 +93,14 @@ impl Function {
         function_name: String,
         docs: String,
         params: Vec<FunctionParam>,
-        returns: Vec<Type>,
+        result: Option<serde_json::Value>,
     ) -> Self {
         Self {
             interface,
             function_name,
             docs,
             params,
-            returns,
+            result,
         }
     }
 
@@ -129,9 +124,9 @@ impl Function {
         &self.params
     }
 
-    /// Get the function return types
-    pub fn returns(&self) -> &[Type] {
-        &self.returns
+    /// Get the function result type
+    pub fn result(&self) -> Option<&serde_json::Value> {
+        self.result.as_ref()
     }
 }
 
@@ -144,49 +139,16 @@ impl fmt::Display for Function {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: String,
-    pub wit_type: Type,
     pub is_optional: bool,
     pub json_schema: serde_json::Value,
 }
 
 impl Parser {
-    pub fn parse(component_bytes: &[u8]) -> Result<Vec<Function>> {
-        let decoded = wit_parser::decoding::decode(component_bytes)?;
-        let resolve = decoded.resolve().clone();
-
-        if resolve.worlds.len() != 1 {
-            return Err(anyhow::anyhow!("Expected exactly one world in component"));
-        }
-
-        let mut functions = Vec::new();
-        let (_, world) = resolve.worlds.iter().next().unwrap();
-
-        for (_, item) in &world.exports {
-            if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
-                let interface_functions = Self::parse_interface(id, &resolve)?;
-                functions.extend(interface_functions);
-            }
-        }
-
-        Ok(functions)
-    }
-
-    /// Discover interface exports from a component
-    /// Returns a list of full interface names (e.g., "wasi:keyvalue/store@0.2.0")
-    pub fn discover_exports(component_bytes: &[u8]) -> Result<Vec<String>> {
-        Self::discover_interfaces(component_bytes, WorldItemType::Exports)
-    }
-
-    /// Discover interface imports from a component
-    /// Returns a list of full interface names (e.g., "wasi:http/outgoing-handler@0.2.0")
-    pub fn discover_imports(component_bytes: &[u8]) -> Result<Vec<String>> {
-        Self::discover_interfaces(component_bytes, WorldItemType::Imports)
-    }
-
-    fn discover_interfaces(
+    /// Parse component and return imports, exports, and optionally functions
+    pub fn parse(
         component_bytes: &[u8],
-        item_type: WorldItemType,
-    ) -> Result<Vec<String>> {
+        parse_functions: bool,
+    ) -> Result<(Vec<String>, Vec<String>, Option<HashMap<String, Function>>)> {
         let decoded = wit_parser::decoding::decode(component_bytes)?;
         let resolve = decoded.resolve().clone();
 
@@ -194,21 +156,46 @@ impl Parser {
             return Err(anyhow::anyhow!("Expected exactly one world in component"));
         }
 
-        let mut interfaces = Vec::new();
         let (_, world) = resolve.worlds.iter().next().unwrap();
 
-        let world_items = match item_type {
-            WorldItemType::Exports => &world.exports,
-            WorldItemType::Imports => &world.imports,
-        };
-
-        for (_, item) in world_items {
+        // Extract imports
+        let mut imports = Vec::new();
+        for (_, item) in &world.imports {
             if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
                 let interface_name = Self::build_full_interface_name(&resolve, *id)?;
-                interfaces.push(interface_name);
+                imports.push(interface_name);
             }
         }
-        Ok(interfaces)
+
+        // Extract exports
+        let mut exports = Vec::new();
+        for (_, item) in &world.exports {
+            if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
+                let interface_name = Self::build_full_interface_name(&resolve, *id)?;
+                exports.push(interface_name);
+            }
+        }
+
+        // Conditionally extract functions (only for tools)
+        let function_map = if parse_functions {
+            let mut functions = Vec::new();
+            for (_, item) in &world.exports {
+                if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
+                    let interface_functions = Self::parse_interface(id, &resolve)?;
+                    functions.extend(interface_functions);
+                }
+            }
+            Some(
+                functions
+                    .into_iter()
+                    .map(|f| (f.function_name().to_string(), f))
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        Ok((imports, exports, function_map))
     }
 
     fn build_full_interface_name(
@@ -290,19 +277,18 @@ impl Parser {
                 let is_optional = Self::is_optional_type(*param_type, resolve);
                 params.push(FunctionParam {
                     name: param_name.clone(),
-                    wit_type: *param_type,
                     is_optional,
                     json_schema,
                 });
             }
 
-            // Validate return types
-            let returns = match &func.result {
+            // Validate and convert result type
+            let result = match &func.result {
                 Some(return_type) => {
                     Self::validate_wit_type_for_json_rpc(*return_type, resolve)?;
-                    vec![*return_type]
+                    Some(Self::wit_type_to_json_schema(*return_type, resolve))
                 }
-                None => vec![],
+                None => None,
             };
 
             let function_obj = Function::new(
@@ -310,7 +296,7 @@ impl Parser {
                 func_name.clone(),
                 func.docs.contents.as_deref().unwrap_or("").to_string(),
                 params,
-                returns,
+                result,
             );
             functions.push(function_obj);
         }
@@ -431,7 +417,9 @@ impl Parser {
                                 field.name.clone(),
                                 Self::wit_type_to_json_schema(field.ty, resolve),
                             );
-                            required.push(field.name.clone());
+                            if !Self::is_optional_type(field.ty, resolve) {
+                                required.push(field.name.clone());
+                            }
                         }
 
                         json!({

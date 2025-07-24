@@ -193,7 +193,7 @@ impl Invoker {
 
         func.call_async(&mut store, &arg_vals, &mut results).await?;
 
-        // Handle multiple results by returning them as an array
+        // Handle results according to WIT function signature
         match results.len() {
             0 => Ok(serde_json::Value::Null),
             1 => {
@@ -208,11 +208,56 @@ impl Invoker {
                 }
             }
             _ => {
-                let json_results: Vec<serde_json::Value> =
-                    results.iter().map(val_to_json).collect();
-                Ok(serde_json::Value::Array(json_results))
+                // Multiple wasmtime results - reconstruct WIT tuple/record structure
+                Self::reconstruct_wit_return(&results, &function)
             }
         }
+    }
+
+    // This handles the case where wasmtime decomposes tuples/records into separate Val objects
+    fn reconstruct_wit_return(results: &[Val], function: &Function) -> Result<serde_json::Value> {
+        // Check if this is a record that needs field mapping to reconstruct as an object
+        if let Some(return_schema) = function.result() {
+            if let Some(schema_obj) = return_schema.as_object() {
+                if schema_obj.get("type").and_then(|t| t.as_str()) == Some("object")
+                    && schema_obj.contains_key("properties")
+                {
+                    return Self::reconstruct_record(results, schema_obj);
+                }
+            }
+        }
+
+        // All other cases (tuples, unknown schemas, malformed schemas) -> array
+        let json_results: Vec<serde_json::Value> = results.iter().map(val_to_json).collect();
+        Ok(serde_json::Value::Array(json_results))
+    }
+
+    // Reconstruct a WIT record from multiple wasmtime results
+    fn reconstruct_record(
+        results: &[Val],
+        schema_obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let properties = schema_obj
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .ok_or_else(|| anyhow::anyhow!("Record schema missing properties"))?;
+
+        let mut record = serde_json::Map::new();
+        let field_names: Vec<&String> = properties.keys().collect();
+
+        if results.len() != field_names.len() {
+            return Err(anyhow::anyhow!(
+                "Mismatch between wasmtime results ({}) and record fields ({})",
+                results.len(),
+                field_names.len()
+            ));
+        }
+
+        for (i, field_name) in field_names.iter().enumerate() {
+            record.insert(field_name.to_string(), val_to_json(&results[i]));
+        }
+
+        Ok(serde_json::Value::Object(record))
     }
 }
 
