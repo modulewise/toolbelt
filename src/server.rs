@@ -11,15 +11,17 @@ use rmcp::{
 };
 use std::net::SocketAddr;
 
+use crate::mapper::McpMapper;
 use crate::registry::CapabilityRegistry;
 use crate::registry::ComponentSpec;
 use crate::registry::ToolRegistry;
 use crate::runtime::Invoker;
-use crate::wit::{ComponentTool, Function, Interface, Parser};
+use crate::wit::{Function, Parser};
+use rmcp::model::Tool;
 
 #[derive(Clone)]
 pub struct ComponentServer {
-    tools: Vec<(ComponentTool, ComponentSpec)>,
+    tools: Vec<(Tool, Function, ComponentSpec)>,
     invoker: Invoker,
     capability_registry: CapabilityRegistry,
 }
@@ -31,10 +33,13 @@ impl ComponentServer {
     ) -> Result<Self> {
         let mut tools = Vec::new();
         for (_name, spec) in tool_registry {
-            match Parser::parse(&spec.bytes, &spec.name) {
-                Ok(component_tools) => {
-                    for tool in component_tools {
-                        tools.push((tool, spec.clone()));
+            match Parser::parse(&spec.bytes) {
+                Ok(functions) => {
+                    let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &spec.name)?;
+
+                    // Store the tools with their corresponding Function objects
+                    for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
+                        tools.push((tool, function, spec.clone()));
                     }
                     println!(
                         "Loaded tool '{}' with runtime capabilities: {:?}",
@@ -87,15 +92,15 @@ impl ComponentServer {
         tool_name: &str,
         arguments: &JsonObject,
     ) -> Result<CallToolResult> {
-        let (tool, spec) = self
+        let (_tool, function, spec) = self
             .tools
             .iter()
-            .find(|(t, _)| t.tool.name == tool_name)
+            .find(|(t, _, _)| t.name == tool_name)
             .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
 
         // Prepare arguments in parameter order
         let mut json_args = Vec::new();
-        for param in &tool.params {
+        for param in function.params() {
             if let Some(value) = arguments.get(&param.name) {
                 json_args.push(value.clone());
             } else {
@@ -106,26 +111,13 @@ impl ComponentServer {
             }
         }
 
-        // Build the interface string from tool components
-        let interface_str = if let Some(ref version) = tool.version {
-            format!(
-                "{}:{}/{}@{}",
-                tool.namespace, tool.package, tool.interface, version
-            )
-        } else {
-            format!("{}:{}/{}", tool.namespace, tool.package, tool.interface)
-        };
-
-        let interface = Interface::parse(&interface_str)?;
-        let function = Function::new(interface, tool.function.clone());
-
         match self
             .invoker
             .invoke(
-                &tool.bytes,
+                &spec.bytes,
                 &spec.runtime_capabilities,
                 &self.capability_registry,
-                function,
+                function.clone(),
                 json_args,
             )
             .await
@@ -152,7 +144,7 @@ impl ServerHandler for ComponentServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
-        if self.tools.iter().any(|(t, _)| t.tool.name == request.name) {
+        if self.tools.iter().any(|(t, _, _)| t.name == request.name) {
             self.handle_tool_call(&request.name, &arguments)
                 .await
                 .map_err(|e| {
@@ -171,7 +163,7 @@ impl ServerHandler for ComponentServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let tools = self.tools.iter().map(|(t, _)| t.tool.clone()).collect();
+        let tools = self.tools.iter().map(|(t, _, _)| t.clone()).collect();
         Ok(ListToolsResult {
             tools,
             next_cursor: None,

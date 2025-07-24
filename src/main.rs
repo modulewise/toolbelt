@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod composer;
 mod loader;
+mod mapper;
 mod registry;
 mod runtime;
 mod server;
