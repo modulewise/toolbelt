@@ -9,6 +9,7 @@ use rmcp::{
     transport::StreamableHttpService,
     transport::streamable_http_server::session::local::LocalSessionManager,
 };
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::mapper::McpMapper;
@@ -16,12 +17,12 @@ use crate::registry::CapabilityRegistry;
 use crate::registry::ComponentSpec;
 use crate::registry::ToolRegistry;
 use crate::runtime::Invoker;
-use crate::wit::{Function, Parser};
+use crate::wit::Function;
 use rmcp::model::Tool;
 
 #[derive(Clone)]
 pub struct ComponentServer {
-    tools: Vec<(Tool, Function, ComponentSpec)>,
+    tools: HashMap<String, (Tool, Function, ComponentSpec)>,
     invoker: Invoker,
     capability_registry: CapabilityRegistry,
 }
@@ -31,24 +32,27 @@ impl ComponentServer {
         capability_registry: CapabilityRegistry,
         tool_registry: ToolRegistry,
     ) -> Result<Self> {
-        let mut tools = Vec::new();
+        let mut tools = HashMap::new();
         for (_name, spec) in tool_registry {
-            match Parser::parse(&spec.bytes) {
-                Ok(functions) => {
-                    let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &spec.name)?;
+            if let Some(functions_map) = &spec.functions {
+                let functions: Vec<Function> = functions_map.values().cloned().collect();
+                let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &spec.name)?;
 
-                    // Store the tools with their corresponding Function objects
-                    for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
-                        tools.push((tool, function, spec.clone()));
-                    }
-                    println!(
-                        "Loaded tool '{}' with runtime capabilities: {:?}",
-                        spec.name, spec.runtime_capabilities
-                    );
+                // Store tools with disambiguated tool names as keys
+                for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
+                    tools.insert(tool.name.to_string(), (tool, function, spec.clone()));
                 }
-                Err(e) => {
-                    eprintln!("Failed to parse component {}: {}", spec.name, e);
-                }
+                let tool_count = functions_map.len();
+                println!(
+                    "Loaded {} {} from '{}' with runtime capabilities: {:?}",
+                    tool_count,
+                    if tool_count == 1 { "tool" } else { "tools" },
+                    spec.name,
+                    spec.runtime_capabilities
+                );
+            } else {
+                // This should not happen for tools, but handle gracefully
+                eprintln!("Warning: Tool component '{}' has no functions", spec.name);
             }
         }
         let invoker = Invoker::new()?;
@@ -94,8 +98,7 @@ impl ComponentServer {
     ) -> Result<CallToolResult> {
         let (_tool, function, spec) = self
             .tools
-            .iter()
-            .find(|(t, _, _)| t.name == tool_name)
+            .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
 
         // Prepare arguments in parameter order
@@ -144,7 +147,7 @@ impl ServerHandler for ComponentServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
-        if self.tools.iter().any(|(t, _, _)| t.name == request.name) {
+        if self.tools.contains_key(request.name.as_ref()) {
             self.handle_tool_call(&request.name, &arguments)
                 .await
                 .map_err(|e| {
@@ -163,7 +166,7 @@ impl ServerHandler for ComponentServer {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        let tools = self.tools.iter().map(|(t, _, _)| t.clone()).collect();
+        let tools = self.tools.values().map(|(t, _, _)| t.clone()).collect();
         Ok(ListToolsResult {
             tools,
             next_cursor: None,

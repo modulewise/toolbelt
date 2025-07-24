@@ -12,7 +12,10 @@ use std::path::PathBuf;
 pub struct ComponentSpec {
     pub name: String,
     pub bytes: Vec<u8>,
+    pub imports: Vec<String>,
+    pub exports: Vec<String>,
     pub runtime_capabilities: Vec<CapabilityName>,
+    pub functions: Option<HashMap<String, crate::wit::Function>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -304,13 +307,7 @@ fn resolve_component_capability_from_definition(
         ));
     }
     let component_spec = process_capability_definition(definition, capability_registry)?;
-    let exports = Parser::discover_exports(&component_spec.bytes).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to discover exports for capability '{}': {}",
-            definition.name,
-            e
-        )
-    })?;
+    let exports = component_spec.exports.clone();
     Ok(ComponentCapability {
         component: component_spec,
         exposed: definition.exposed,
@@ -396,10 +393,10 @@ fn process_component_core(
     let component_path = resolve_uri(uri)?;
     let mut bytes = fs::read(&component_path)?;
 
-    let mut component_imports = Parser::discover_imports(&bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to discover component imports: {}", e))?;
+    let (mut imports, exports, functions) = Parser::parse(&bytes, is_tool)
+        .map_err(|e| anyhow::anyhow!("Failed to parse component: {}", e))?;
 
-    let imports_config = component_imports
+    let imports_config = imports
         .iter()
         .any(|import| import.starts_with("wasi:config/store"));
 
@@ -416,7 +413,7 @@ fn process_component_core(
                 e
             )
         })?;
-        component_imports.retain(|import| !import.starts_with("wasi:config/store"));
+        imports.retain(|import| !import.starts_with("wasi:config/store"));
     } else if config.is_some() {
         println!(
             "Warning: Config provided for {} '{}' but component doesn't import wasi:config/store",
@@ -425,12 +422,7 @@ fn process_component_core(
         );
     }
 
-    validate_imports(
-        &component_imports,
-        capabilities,
-        capability_registry,
-        is_tool,
-    )?;
+    validate_imports(&imports, capabilities, capability_registry, is_tool)?;
 
     let mut remaining_capabilities = Vec::new();
     let mut all_runtime_capabilities = HashSet::new();
@@ -509,7 +501,10 @@ fn process_component_core(
     Ok(ComponentSpec {
         name: name.to_string(),
         bytes,
+        imports,
+        exports,
         runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
+        functions,
     })
 }
 
