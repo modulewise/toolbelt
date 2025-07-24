@@ -1,5 +1,4 @@
 use anyhow::Result;
-use rmcp::model::Tool;
 use serde_json::json;
 use std::fmt;
 use wit_parser::{Resolve, Type};
@@ -82,19 +81,31 @@ impl fmt::Display for Interface {
     }
 }
 
-/// A WebAssembly function call specification
+/// A WebAssembly function specification with parsed WIT metadata
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     interface: Interface,
-    function: String,
+    function_name: String,
+    docs: String,
+    params: Vec<FunctionParam>,
+    returns: Vec<Type>,
 }
 
 impl Function {
-    /// Create a new WIT function specification
-    pub fn new(interface: Interface, function: String) -> Self {
+    /// Create a new WIT function specification from parsed data
+    fn new(
+        interface: Interface,
+        function_name: String,
+        docs: String,
+        params: Vec<FunctionParam>,
+        returns: Vec<Type>,
+    ) -> Self {
         Self {
             interface,
-            function,
+            function_name,
+            docs,
+            params,
+            returns,
         }
     }
 
@@ -105,50 +116,41 @@ impl Function {
 
     /// Get the function name
     pub fn function_name(&self) -> &str {
-        &self.function
+        &self.function_name
+    }
+
+    /// Get the function documentation
+    pub fn docs(&self) -> &str {
+        &self.docs
+    }
+
+    /// Get the function parameters
+    pub fn params(&self) -> &[FunctionParam] {
+        &self.params
+    }
+
+    /// Get the function return types
+    pub fn returns(&self) -> &[Type] {
+        &self.returns
     }
 }
 
 impl fmt::Display for Function {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}#{}", self.interface, self.function)
+        write!(f, "{}#{}", self.interface, self.function_name)
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct ComponentTool {
-    pub tool: Tool,
-    pub bytes: Vec<u8>,
-    pub namespace: String,
-    pub package: String,
-    pub version: Option<String>,
-    pub interface: String,
-    pub function: String,
-    pub params: Vec<FunctionParam>,
-}
-
-#[derive(Clone, Debug)]
-struct ComponentFunction {
-    pub component: String,
-    pub namespace: String,
-    pub package: String,
-    pub version: Option<String>,
-    pub interface: String,
-    pub function: String,
-    pub docs: String,
-    pub params: Vec<FunctionParam>,
-    pub returns: Vec<Type>,
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
     pub name: String,
     pub wit_type: Type,
+    pub is_optional: bool,
+    pub json_schema: serde_json::Value,
 }
 
 impl Parser {
-    pub fn parse(component_bytes: &[u8], component_name: &str) -> Result<Vec<ComponentTool>> {
-        let bytes = component_bytes.to_vec();
+    pub fn parse(component_bytes: &[u8]) -> Result<Vec<Function>> {
         let decoded = wit_parser::decoding::decode(component_bytes)?;
         let resolve = decoded.resolve().clone();
 
@@ -161,20 +163,12 @@ impl Parser {
 
         for (_, item) in &world.exports {
             if let wit_parser::WorldItem::Interface { id, stability: _ } = item {
-                let interface_functions = Self::parse_interface(id, &resolve, component_name)?;
+                let interface_functions = Self::parse_interface(id, &resolve)?;
                 functions.extend(interface_functions);
             }
         }
 
-        let requires_disambiguation = Self::has_function_name_conflicts(&functions);
-        let component_tools = functions
-            .into_iter()
-            .map(|func| {
-                Self::function_to_component_tool(func, &bytes, requires_disambiguation, &resolve)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        Ok(component_tools)
+        Ok(functions)
     }
 
     /// Discover interface exports from a component
@@ -250,8 +244,7 @@ impl Parser {
     fn parse_interface(
         interface_id: &wit_parser::InterfaceId,
         resolve: &Resolve,
-        component_name: &str,
-    ) -> Result<Vec<ComponentFunction>> {
+    ) -> Result<Vec<Function>> {
         let interface = resolve.interfaces.get(*interface_id).unwrap();
         let interface_name = interface
             .name
@@ -273,33 +266,53 @@ impl Parser {
             ));
         };
 
+        let version_suffix = version
+            .as_ref()
+            .map(|v| format!("@{v}"))
+            .unwrap_or_default();
+        let full_interface_name = format!("{namespace}:{package}/{interface_name}{version_suffix}");
+
+        let interface_obj = Interface {
+            namespace,
+            package,
+            interface: interface_name,
+            version,
+            full_name: full_interface_name,
+        };
+
         let mut functions = Vec::new();
         for (func_name, func) in &interface.functions {
-            let params = func
-                .params
-                .iter()
-                .map(|(param_name, param_type)| FunctionParam {
+            // Validate and resolve parameter types
+            let mut params = Vec::new();
+            for (param_name, param_type) in &func.params {
+                Self::validate_wit_type_for_json_rpc(*param_type, resolve)?;
+                let json_schema = Self::wit_type_to_json_schema(*param_type, resolve);
+                let is_optional = Self::is_optional_type(*param_type, resolve);
+                params.push(FunctionParam {
                     name: param_name.clone(),
                     wit_type: *param_type,
-                })
-                .collect();
+                    is_optional,
+                    json_schema,
+                });
+            }
 
+            // Validate return types
             let returns = match &func.result {
-                Some(return_type) => vec![*return_type],
+                Some(return_type) => {
+                    Self::validate_wit_type_for_json_rpc(*return_type, resolve)?;
+                    vec![*return_type]
+                }
                 None => vec![],
             };
 
-            functions.push(ComponentFunction {
-                component: component_name.to_string(),
-                namespace: namespace.clone(),
-                package: package.clone(),
-                version: version.clone(),
-                interface: interface_name.clone(),
-                function: func_name.clone(),
-                docs: func.docs.contents.as_deref().unwrap_or("").to_string(),
+            let function_obj = Function::new(
+                interface_obj.clone(),
+                func_name.clone(),
+                func.docs.contents.as_deref().unwrap_or("").to_string(),
                 params,
                 returns,
-            });
+            );
+            functions.push(function_obj);
         }
         Ok(functions)
     }
@@ -548,15 +561,6 @@ impl Parser {
         }
     }
 
-    fn has_function_name_conflicts(functions: &[ComponentFunction]) -> bool {
-        use std::collections::HashMap;
-        let mut function_counts: HashMap<String, u32> = HashMap::new();
-        for func in functions {
-            *function_counts.entry(func.function.clone()).or_insert(0) += 1;
-        }
-        function_counts.values().any(|&count| count > 1)
-    }
-
     fn is_optional_type(wit_type: Type, resolve: &Resolve) -> bool {
         match wit_type {
             Type::Id(type_id) => {
@@ -574,76 +578,5 @@ impl Parser {
             }
             _ => false,
         }
-    }
-
-    fn function_to_component_tool(
-        func: ComponentFunction,
-        bytes: &[u8],
-        requires_disambiguation: bool,
-        resolve: &Resolve,
-    ) -> Result<ComponentTool> {
-        let tool_name = if requires_disambiguation {
-            format!("{}_{}_{}", func.component, func.interface, func.function)
-        } else {
-            format!("{}_{}", func.component, func.function)
-        };
-        let description = if func.docs.is_empty() {
-            format!(
-                "Call {} function from {} component",
-                func.function, func.component
-            )
-        } else {
-            func.docs
-        };
-
-        for param in &func.params {
-            Self::validate_wit_type_for_json_rpc(param.wit_type, resolve)?;
-        }
-
-        for return_type in &func.returns {
-            Self::validate_wit_type_for_json_rpc(*return_type, resolve)?;
-        }
-
-        let mut properties = serde_json::Map::new();
-        let mut required = Vec::new();
-
-        for param in &func.params {
-            let mut param_schema = Self::wit_type_to_json_schema(param.wit_type, resolve);
-            if let serde_json::Value::Object(ref mut schema_obj) = param_schema {
-                schema_obj.insert(
-                    "description".to_string(),
-                    serde_json::Value::String(format!("Parameter: {}", param.name)),
-                );
-            }
-            properties.insert(param.name.clone(), param_schema);
-            if !Self::is_optional_type(param.wit_type, resolve) {
-                required.push(param.name.clone());
-            }
-        }
-
-        let input_schema = json!({
-            "type": "object",
-            "properties": properties,
-            "required": required,
-            "additionalProperties": false
-        });
-
-        let tool = Tool {
-            name: tool_name.into(),
-            description: Some(description.into()),
-            input_schema: input_schema.as_object().unwrap().clone().into(),
-            annotations: None,
-        };
-
-        Ok(ComponentTool {
-            tool,
-            bytes: bytes.to_vec(),
-            namespace: func.namespace,
-            package: func.package,
-            version: func.version,
-            interface: func.interface,
-            function: func.function,
-            params: func.params,
-        })
     }
 }
