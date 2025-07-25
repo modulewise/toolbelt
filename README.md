@@ -26,7 +26,7 @@ it to your cargo bin directory which should be on your PATH.
 One or more `.wasm` files may be provided as command line arguments (see [example-components](https://github.com/modulewise/example-components)):
 
 ```sh
-toolbelt hello.wasm calculator.wasm
+toolbelt oci://ghcr.io/modulewise/hello:0.1.0
 ```
 
 By default, components operate in a least-privilege capability mode.
