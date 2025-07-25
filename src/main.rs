@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     let (capability_definitions, tool_definitions) =
         load_definitions(&cli.capabilities, &cli.tools, &cli.definitions_and_wasm)?;
     let (capability_registry, tool_registry) =
-        build_registries(capability_definitions, tool_definitions)?;
+        build_registries(capability_definitions, tool_definitions).await?;
 
     let server = ComponentServer::new(capability_registry, tool_registry)?;
     server.run(addr).await?;

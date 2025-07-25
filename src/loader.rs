@@ -57,7 +57,12 @@ pub fn load_definitions(
     let mut wasm_files = Vec::new();
 
     for path in mixed_definition_files {
-        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
+        let path_str = path.to_string_lossy();
+
+        // Handle OCI URIs as wasm components
+        if path_str.starts_with("oci://") {
+            wasm_files.push(path.clone());
+        } else if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
             match extension {
                 "wasm" => wasm_files.push(path.clone()),
                 "toml" => definition_files.push(path.clone()),
@@ -295,16 +300,30 @@ fn convert_toml_value_to_json(value: &toml::Value) -> Result<serde_json::Value> 
 fn create_implicit_tool_definitions(wasm_files: &[PathBuf]) -> Result<Vec<ToolDefinition>> {
     let mut definitions = Vec::new();
     for path in wasm_files {
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Cannot extract component name from path: {}",
-                    path.display()
-                )
-            })?
-            .to_string();
+        let path_str = path.to_string_lossy();
+        let name = if path_str.starts_with("oci://") {
+            // Extract component name from OCI URI: oci://ghcr.io/modulewise/hello:0.1.0 -> hello
+            let oci_ref = path_str.strip_prefix("oci://").unwrap();
+            if let Some((pkg_part, _version)) = oci_ref.rsplit_once(':') {
+                if let Some(name_part) = pkg_part.rsplit_once('/') {
+                    name_part.1.to_string()
+                } else {
+                    pkg_part.to_string()
+                }
+            } else {
+                return Err(anyhow::anyhow!("Invalid OCI URI format: {}", path_str));
+            }
+        } else {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Cannot extract component name from path: {}",
+                        path.display()
+                    )
+                })?
+                .to_string()
+        };
         let definition = ToolDefinition {
             name,
             base: ComponentDefinition {
