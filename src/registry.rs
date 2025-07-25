@@ -5,7 +5,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::composer::Composer;
 use crate::loader::{CapabilityDefinition, CapabilityName, ToolDefinition};
 use crate::wit::Parser;
-use std::fs;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -90,12 +89,12 @@ impl Default for CapabilityRegistry {
 pub type ToolRegistry = HashMap<String, ComponentSpec>;
 
 /// Build registries from definitions
-pub fn build_registries(
+pub async fn build_registries(
     capability_definitions: Vec<CapabilityDefinition>,
     tool_definitions: Vec<ToolDefinition>,
 ) -> Result<(CapabilityRegistry, ToolRegistry)> {
-    let capability_registry = create_capability_registry(capability_definitions)?;
-    let tool_registry = create_tool_registry(tool_definitions, &capability_registry)?;
+    let capability_registry = create_capability_registry(capability_definitions).await?;
+    let tool_registry = create_tool_registry(tool_definitions, &capability_registry).await?;
     Ok((capability_registry, tool_registry))
 }
 
@@ -124,7 +123,7 @@ impl CapabilityRegistryBuilder {
         self.pending.push_back(definition);
     }
 
-    fn try_next(&mut self) -> Result<Option<bool>> {
+    async fn try_next(&mut self) -> Result<Option<bool>> {
         if self.pending.is_empty() {
             return Ok(None);
         }
@@ -136,7 +135,7 @@ impl CapabilityRegistryBuilder {
             self.component_capabilities.clone(),
         );
 
-        match resolve_component_capability_from_definition(&definition, &temp_registry) {
+        match resolve_component_capability_from_definition(&definition, &temp_registry).await {
             Ok(component_capability) => {
                 self.component_capabilities
                     .insert(definition.name.clone(), component_capability);
@@ -162,13 +161,13 @@ impl CapabilityRegistryBuilder {
         }
     }
 
-    fn build_registry(mut self) -> Result<CapabilityRegistry> {
+    async fn build_registry(mut self) -> Result<CapabilityRegistry> {
         let mut attempts = 0;
         let max_attempts = self.pending.len() * self.pending.len(); // Prevent infinite loops
 
         let mut consecutive_failures = 0;
         while !self.pending.is_empty() && attempts < max_attempts {
-            match self.try_next()? {
+            match self.try_next().await? {
                 Some(true) => {
                     // Successfully resolved a capability
                     consecutive_failures = 0;
@@ -210,7 +209,7 @@ impl CapabilityRegistryBuilder {
     }
 }
 
-fn create_capability_registry(
+async fn create_capability_registry(
     definitions: Vec<CapabilityDefinition>,
 ) -> Result<CapabilityRegistry> {
     let mut builder = CapabilityRegistryBuilder::new();
@@ -227,16 +226,16 @@ fn create_capability_registry(
             builder.add_pending_component_capability_definition(def);
         }
     }
-    builder.build_registry()
+    builder.build_registry().await
 }
 
-fn create_tool_registry(
+async fn create_tool_registry(
     definitions: Vec<ToolDefinition>,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ToolRegistry> {
     let mut tool_registry = HashMap::new();
     for def in definitions {
-        match process_tool_definition(&def, capability_registry) {
+        match process_tool_definition(&def, capability_registry).await {
             Ok(spec) => {
                 tool_registry.insert(def.name.clone(), spec);
             }
@@ -296,7 +295,7 @@ fn get_interfaces_for_runtime_capability(uri: &str) -> Vec<String> {
     }
 }
 
-fn resolve_component_capability_from_definition(
+async fn resolve_component_capability_from_definition(
     definition: &CapabilityDefinition,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ComponentCapability> {
@@ -306,7 +305,7 @@ fn resolve_component_capability_from_definition(
             definition.name
         ));
     }
-    let component_spec = process_capability_definition(definition, capability_registry)?;
+    let component_spec = process_capability_definition(definition, capability_registry).await?;
     let exports = component_spec.exports.clone();
     Ok(ComponentCapability {
         component: component_spec,
@@ -315,7 +314,7 @@ fn resolve_component_capability_from_definition(
     })
 }
 
-fn process_capability_definition(
+async fn process_capability_definition(
     definition: &CapabilityDefinition,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ComponentSpec> {
@@ -326,7 +325,8 @@ fn process_capability_definition(
         &definition.capabilities,
         capability_registry,
         false, // is_tool
-    )?;
+    )
+    .await?;
     for dependency_name in &definition.capabilities {
         if capability_registry
             .get_component_capability(dependency_name)
@@ -341,7 +341,7 @@ fn process_capability_definition(
     Ok(component_spec)
 }
 
-fn process_tool_definition(
+async fn process_tool_definition(
     definition: &ToolDefinition,
     capability_registry: &CapabilityRegistry,
 ) -> Result<ComponentSpec> {
@@ -367,7 +367,8 @@ fn process_tool_definition(
         &definition.capabilities,
         capability_registry,
         true, // is_tool
-    )?;
+    )
+    .await?;
     for capability_name in &definition.capabilities {
         if capability_registry
             .get_exposed_component_capability(capability_name)
@@ -382,7 +383,7 @@ fn process_tool_definition(
     Ok(component_spec)
 }
 
-fn process_component_core(
+async fn process_component_core(
     name: &str,
     uri: &str,
     config: &Option<HashMap<String, serde_json::Value>>,
@@ -390,8 +391,7 @@ fn process_component_core(
     capability_registry: &CapabilityRegistry,
     is_tool: bool,
 ) -> Result<ComponentSpec> {
-    let component_path = resolve_uri(uri)?;
-    let mut bytes = fs::read(&component_path)?;
+    let mut bytes = read_bytes(uri).await?;
 
     let (mut imports, exports, functions) = Parser::parse(&bytes, is_tool)
         .map_err(|e| anyhow::anyhow!("Failed to parse component: {}", e))?;
@@ -508,11 +508,29 @@ fn process_component_core(
     })
 }
 
-fn resolve_uri(uri: &str) -> Result<PathBuf> {
-    if let Some(path_str) = uri.strip_prefix("file://") {
-        Ok(PathBuf::from(path_str))
+async fn read_bytes(uri: &str) -> Result<Vec<u8>> {
+    if let Some(oci_ref) = uri.strip_prefix("oci://") {
+        let client = wasm_pkg_client::oci::client::Client::new(Default::default());
+        let image_ref = oci_ref.parse()?;
+        let auth = oci_client::secrets::RegistryAuth::Anonymous;
+        let media_types = vec!["application/wasm", "application/vnd.wasm.component"];
+
+        let image_data = client.pull(&image_ref, &auth, media_types).await?;
+
+        // Get the component bytes from the first layer
+        if let Some(layer) = image_data.layers.first() {
+            Ok(layer.data.clone())
+        } else {
+            Err(anyhow::anyhow!("No layers found in OCI image: {}", oci_ref))
+        }
     } else {
-        Ok(PathBuf::from(uri))
+        // Handle both file:// and plain paths
+        let path = if let Some(path_str) = uri.strip_prefix("file://") {
+            PathBuf::from(path_str)
+        } else {
+            PathBuf::from(uri)
+        };
+        Ok(std::fs::read(path)?)
     }
 }
 
