@@ -4,6 +4,12 @@ use std::collections::HashMap;
 use std::fmt;
 use wit_parser::{Resolve, Type};
 
+#[derive(Debug, Clone)]
+pub struct ComponentMetadata {
+    pub namespace: Option<String>,
+    pub package: Option<String>,
+}
+
 pub struct Parser;
 
 /// A validated WebAssembly Interface Type (WIT) interface name
@@ -148,7 +154,12 @@ impl Parser {
     pub fn parse(
         component_bytes: &[u8],
         parse_functions: bool,
-    ) -> Result<(Vec<String>, Vec<String>, Option<HashMap<String, Function>>)> {
+    ) -> Result<(
+        ComponentMetadata,
+        Vec<String>,
+        Vec<String>,
+        Option<HashMap<String, Function>>,
+    )> {
         let decoded = wit_parser::decoding::decode(component_bytes)?;
         let resolve = decoded.resolve().clone();
 
@@ -157,6 +168,21 @@ impl Parser {
         }
 
         let (_, world) = resolve.worlds.iter().next().unwrap();
+
+        // Extract component's own package/namespace metadata
+        let component_metadata = if let Some(package_id) = &world.package {
+            let package = resolve.packages.get(*package_id).unwrap();
+            let package_name = &package.name;
+            ComponentMetadata {
+                namespace: Some(package_name.namespace.clone()),
+                package: Some(package_name.name.clone()),
+            }
+        } else {
+            ComponentMetadata {
+                namespace: None,
+                package: None,
+            }
+        };
 
         // Extract imports
         let mut imports = Vec::new();
@@ -176,7 +202,7 @@ impl Parser {
             }
         }
 
-        // Conditionally extract functions (only for tools)
+        // Conditionally extract functions (only for exposed components)
         let function_map = if parse_functions {
             let mut functions = Vec::new();
             for (_, item) in &world.exports {
@@ -195,7 +221,7 @@ impl Parser {
             None
         };
 
-        Ok((imports, exports, function_map))
+        Ok((component_metadata, imports, exports, function_map))
     }
 
     fn build_full_interface_name(
