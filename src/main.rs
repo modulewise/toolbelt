@@ -27,23 +27,9 @@ struct Cli {
     #[arg(short, long, default_value_t = 3001)]
     port: u16,
 
-    /// Capability definition files (.toml files with [capabilityname] sections)
-    #[arg(
-        short = 'c',
-        long = "capabilities",
-        help = "Capability definition files"
-    )]
-    capabilities: Vec<PathBuf>,
-
-    /// Tool definition files (.toml files with [toolname] sections)
-    #[arg(short = 't', long = "tools", help = "Tool definition files")]
-    tools: Vec<PathBuf>,
-
-    /// Multi-definition files and standalone .wasm files
-    #[arg(
-        help = "Multi-definition files (.toml with [capabilities.*] and [tools.*]) and standalone .wasm files"
-    )]
-    definitions_and_wasm: Vec<PathBuf>,
+    /// Component definition files (.toml) and standalone .wasm files
+    #[arg(help = "Component definition files (.toml) and standalone .wasm files")]
+    definitions: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -52,12 +38,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
-    let (capability_definitions, tool_definitions) =
-        load_definitions(&cli.capabilities, &cli.tools, &cli.definitions_and_wasm)?;
-    let (capability_registry, tool_registry) =
-        build_registries(capability_definitions, tool_definitions).await?;
+    let (runtime_feature_definitions, component_definitions) = load_definitions(&cli.definitions)?;
+    let (runtime_feature_registry, component_registry) =
+        build_registries(runtime_feature_definitions, component_definitions).await?;
 
-    let server = ComponentServer::new(capability_registry, tool_registry)?;
+    let server = ComponentServer::new(runtime_feature_registry, component_registry)?;
     server.run(addr).await?;
     Ok(())
 }

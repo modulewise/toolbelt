@@ -1,125 +1,198 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 use crate::composer::Composer;
-use crate::loader::{CapabilityDefinition, CapabilityName, ToolDefinition};
-use crate::wit::Parser;
-use std::path::PathBuf;
+use crate::loader::{ComponentDefinition, RuntimeFeatureDefinition};
+use crate::wit::{ComponentMetadata, Parser};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeFeature {
+    pub uri: String,
+    pub enables: String,
+    pub interfaces: Vec<String>, // WASI interfaces this runtime feature provides
+}
 
 #[derive(Debug, Clone)]
 pub struct ComponentSpec {
     pub name: String,
+    pub namespace: Option<String>,
+    pub package: Option<String>,
     pub bytes: Vec<u8>,
     pub imports: Vec<String>,
     pub exports: Vec<String>,
-    pub runtime_capabilities: Vec<CapabilityName>,
+    pub runtime_features: Vec<String>,
     pub functions: Option<HashMap<String, crate::wit::Function>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeCapability {
-    pub uri: String,
-    pub exposed: bool,
-    pub interfaces: Vec<String>, // WASI interfaces this capability provides
+#[derive(Debug, Clone)]
+pub struct RuntimeFeatureRegistry {
+    pub runtime_features: HashMap<String, RuntimeFeature>,
 }
 
 #[derive(Debug, Clone)]
-pub struct ComponentCapability {
+pub struct ComponentRegistry {
+    pub components: HashMap<String, ComponentSpec>,
+    enabling_components: HashMap<String, EnablingComponent>,
+}
+
+#[derive(Debug, Clone)]
+struct EnablingComponent {
     pub component: ComponentSpec,
     pub exposed: bool,
-    pub exports: Vec<String>, // Interfaces this component capability provides
+    pub enables: String,
+    pub exports: Vec<String>, // Interfaces this enabling component provides
 }
 
-#[derive(Debug, Clone)]
-pub struct CapabilityRegistry {
-    pub runtime_capabilities: HashMap<String, RuntimeCapability>,
-    pub component_capabilities: HashMap<String, ComponentCapability>,
+impl RuntimeFeatureRegistry {
+    pub fn new(runtime_features: HashMap<String, RuntimeFeature>) -> Self {
+        Self { runtime_features }
+    }
+
+    pub fn get_runtime_feature(&self, name: &str) -> Option<&RuntimeFeature> {
+        self.runtime_features.get(name)
+    }
+
+    pub fn get_enabled_runtime_feature(
+        &self,
+        requesting_component: &ComponentDefinition,
+        feature_name: &str,
+    ) -> Option<&RuntimeFeature> {
+        if let Some(runtime_feature) = self.runtime_features.get(feature_name) {
+            match runtime_feature.enables.as_str() {
+                "none" => None,
+                "any" => Some(runtime_feature),
+                "exposed" => {
+                    if requesting_component.exposed {
+                        Some(runtime_feature)
+                    } else {
+                        None
+                    }
+                }
+                "unexposed" => {
+                    if !requesting_component.exposed {
+                        Some(runtime_feature)
+                    } else {
+                        None
+                    }
+                }
+                "package" => None,
+                "namespace" => None,
+                _ => None, // Unknown enables scope
+            }
+        } else {
+            None
+        }
+    }
 }
 
-impl CapabilityRegistry {
-    pub fn new(
-        runtime_capabilities: HashMap<String, RuntimeCapability>,
-        component_capabilities: HashMap<String, ComponentCapability>,
-    ) -> Self {
+impl ComponentRegistry {
+    pub fn new(components: HashMap<String, ComponentSpec>) -> Self {
         Self {
-            runtime_capabilities,
-            component_capabilities,
+            components,
+            enabling_components: HashMap::new(),
         }
     }
 
-    /// Create an empty registry with no capabilities
     pub fn empty() -> Self {
-        Self {
-            runtime_capabilities: HashMap::new(),
-            component_capabilities: HashMap::new(),
+        Self::new(HashMap::new())
+    }
+
+    pub fn get_components(&self) -> impl Iterator<Item = &ComponentSpec> {
+        self.components.values()
+    }
+
+    pub fn get_enabled_component_dependency(
+        &self,
+        requesting_component: &ComponentDefinition,
+        requesting_metadata: &ComponentMetadata,
+        dependency_name: &str,
+    ) -> Option<&ComponentSpec> {
+        if let Some(enabling_component) = self.enabling_components.get(dependency_name) {
+            match enabling_component.enables.as_str() {
+                "none" => None,
+                "any" => Some(&enabling_component.component),
+                "exposed" => {
+                    if requesting_component.exposed {
+                        Some(&enabling_component.component)
+                    } else {
+                        None
+                    }
+                }
+                "unexposed" => {
+                    if !requesting_component.exposed {
+                        Some(&enabling_component.component)
+                    } else {
+                        None
+                    }
+                }
+                "package" => {
+                    match (
+                        requesting_metadata.package.as_deref(),
+                        enabling_component.component.package.as_deref(),
+                    ) {
+                        (Some(req_pkg), Some(enable_pkg)) if req_pkg == enable_pkg => {
+                            Some(&enabling_component.component)
+                        }
+                        _ => None,
+                    }
+                }
+                "namespace" => {
+                    match (
+                        requesting_metadata.namespace.as_deref(),
+                        enabling_component.component.namespace.as_deref(),
+                    ) {
+                        (Some(req_ns), Some(enable_ns)) if req_ns == enable_ns => {
+                            Some(&enabling_component.component)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
         }
-    }
-
-    pub fn get_runtime_capability(&self, name: &str) -> Option<&RuntimeCapability> {
-        self.runtime_capabilities.get(name)
-    }
-
-    /// Get runtime capability only if it's exposed to tools
-    pub fn get_exposed_runtime_capability(&self, name: &str) -> Option<&RuntimeCapability> {
-        self.runtime_capabilities
-            .get(name)
-            .filter(|cap| cap.exposed)
-    }
-
-    pub fn get_component_capability(&self, name: &str) -> Option<&ComponentCapability> {
-        self.component_capabilities.get(name)
-    }
-
-    /// Get component capability only if it's exposed to tools
-    pub fn get_exposed_component_capability(&self, name: &str) -> Option<&ComponentCapability> {
-        self.component_capabilities
-            .get(name)
-            .filter(|cap| cap.exposed)
     }
 }
 
-impl Default for CapabilityRegistry {
+impl Default for ComponentRegistry {
     fn default() -> Self {
         Self::empty()
     }
 }
 
-/// Tool registry type alias - contains tool component specifications
-pub type ToolRegistry = HashMap<String, ComponentSpec>;
-
 /// Build registries from definitions
 pub async fn build_registries(
-    capability_definitions: Vec<CapabilityDefinition>,
-    tool_definitions: Vec<ToolDefinition>,
-) -> Result<(CapabilityRegistry, ToolRegistry)> {
-    let capability_registry = create_capability_registry(capability_definitions).await?;
-    let tool_registry = create_tool_registry(tool_definitions, &capability_registry).await?;
-    Ok((capability_registry, tool_registry))
+    runtime_feature_definitions: Vec<RuntimeFeatureDefinition>,
+    component_definitions: Vec<ComponentDefinition>,
+) -> Result<(RuntimeFeatureRegistry, ComponentRegistry)> {
+    let runtime_feature_registry =
+        create_runtime_feature_registry(runtime_feature_definitions).await?;
+    let component_registry =
+        create_component_registry(component_definitions, &runtime_feature_registry).await?;
+    Ok((runtime_feature_registry, component_registry))
 }
 
-struct CapabilityRegistryBuilder {
-    runtime_capabilities: HashMap<String, RuntimeCapability>,
-    component_capabilities: HashMap<String, ComponentCapability>,
-    pending: VecDeque<CapabilityDefinition>,
-    last_errors: HashMap<String, String>, // Track last error for each capability
+struct ComponentRegistryBuilder {
+    components: HashMap<String, ComponentSpec>,
+    enabling_components: HashMap<String, EnablingComponent>,
+    runtime_features: HashMap<String, RuntimeFeature>,
+    pending: VecDeque<ComponentDefinition>,
 }
 
-impl CapabilityRegistryBuilder {
+impl ComponentRegistryBuilder {
     fn new() -> Self {
         Self {
-            runtime_capabilities: HashMap::new(),
-            component_capabilities: HashMap::new(),
+            components: HashMap::new(),
+            enabling_components: HashMap::new(),
+            runtime_features: HashMap::new(),
             pending: VecDeque::new(),
-            last_errors: HashMap::new(),
         }
     }
 
-    fn add_runtime_capability(&mut self, name: String, capability: RuntimeCapability) {
-        self.runtime_capabilities.insert(name, capability);
-    }
-
-    fn add_pending_component_capability_definition(&mut self, definition: CapabilityDefinition) {
+    fn add_pending_component_definition(&mut self, definition: ComponentDefinition) {
         self.pending.push_back(definition);
     }
 
@@ -129,30 +202,63 @@ impl CapabilityRegistryBuilder {
         }
         let definition = self.pending.pop_front().unwrap();
 
-        // Create a temporary registry with current state for dependency checking
-        let temp_registry = CapabilityRegistry::new(
-            self.runtime_capabilities.clone(),
-            self.component_capabilities.clone(),
-        );
+        for dependency_name in &definition.expects {
+            if !self.runtime_features.contains_key(dependency_name)
+                && !self.enabling_components.contains_key(dependency_name)
+            {
+                // Dependency missing - will retry
+                self.pending.push_back(definition);
+                return Ok(Some(false));
+            }
+        }
 
-        match resolve_component_capability_from_definition(&definition, &temp_registry).await {
-            Ok(component_capability) => {
-                self.component_capabilities
-                    .insert(definition.name.clone(), component_capability);
-                Ok(Some(true)) // Successfully resolved
+        // Create temporary registries for dependency resolution
+        let temp_runtime_registry = RuntimeFeatureRegistry::new(self.runtime_features.clone());
+        let temp_component_registry = ComponentRegistry {
+            components: self.components.clone(),
+            enabling_components: self.enabling_components.clone(),
+        };
+
+        match process_component(
+            &definition,
+            &temp_runtime_registry,
+            &temp_component_registry,
+        )
+        .await
+        {
+            Ok(component_spec) => {
+                // Store only exposed components in final registry
+                if definition.exposed {
+                    self.components
+                        .insert(definition.name.clone(), component_spec.clone());
+                }
+
+                // Create enabling wrapper if this component can enable others
+                if definition.enables != "none" {
+                    let enabling_component = EnablingComponent {
+                        component: component_spec.clone(),
+                        exposed: definition.exposed,
+                        enables: definition.enables.clone(),
+                        exports: component_spec.exports.clone(),
+                    };
+                    self.enabling_components
+                        .insert(definition.name.clone(), enabling_component);
+                }
+
+                Ok(Some(true)) // Successfully processed
             }
             Err(e) => {
-                let error_msg = e.to_string();
-                if error_msg.contains("unavailable dependency")
-                    || error_msg.contains("unauthorized interface")
-                {
-                    self.last_errors.insert(definition.name.clone(), error_msg);
-                    self.pending.push_back(definition);
-                    Ok(Some(false)) // Failed but retryable
+                if definition.exposed {
+                    // Skip exposed components on any error
+                    eprintln!(
+                        "Warning: Skipping exposed component '{}': {}",
+                        definition.name, e
+                    );
+                    Ok(Some(true)) // Continue processing (no component added to registry)
                 } else {
-                    // Other errors are real failures
+                    // Fail for non-exposed components
                     Err(anyhow::anyhow!(
-                        "Failed to resolve capability '{}': {}",
+                        "Failed to resolve component '{}': {}",
                         definition.name,
                         e
                     ))
@@ -161,37 +267,47 @@ impl CapabilityRegistryBuilder {
         }
     }
 
-    async fn build_registry(mut self) -> Result<CapabilityRegistry> {
+    async fn build_registry(mut self) -> Result<ComponentRegistry> {
         let mut attempts = 0;
         let max_attempts = self.pending.len() * self.pending.len(); // Prevent infinite loops
 
-        let mut consecutive_failures = 0;
+        let mut consecutive_retries = 0;
         while !self.pending.is_empty() && attempts < max_attempts {
             match self.try_next().await? {
                 Some(true) => {
-                    // Successfully resolved a capability
-                    consecutive_failures = 0;
+                    // Component processed successfully (or exposed component skipped)
+                    consecutive_retries = 0;
                 }
                 Some(false) => {
-                    // Failed but moved to back for retry
-                    consecutive_failures += 1;
-                    if consecutive_failures >= self.pending.len() {
-                        let detailed_errors: Vec<String> = self
-                            .pending
-                            .iter()
-                            .map(|definition| {
-                                if let Some(error) = self.last_errors.get(&definition.name) {
-                                    format!("'{}': {error}", definition.name)
-                                } else {
-                                    format!("'{}': unknown error", definition.name)
-                                }
-                            })
-                            .collect();
+                    // Component retried due to missing dependencies
+                    consecutive_retries += 1;
+                    if consecutive_retries >= self.pending.len() {
+                        let (exposed_failures, unexposed_failures): (Vec<_>, Vec<_>) =
+                            self.pending.iter().partition(|def| def.exposed);
 
-                        return Err(anyhow::anyhow!(
-                            "Cannot resolve capability dependencies:\n{}",
-                            detailed_errors.join("\n")
-                        ));
+                        // Skip exposed components with warnings
+                        for definition in &exposed_failures {
+                            eprintln!(
+                                "Warning: Skipping exposed component '{}' due to missing dependencies",
+                                definition.name
+                            );
+                        }
+
+                        // Fail if any non-exposed components cannot be resolved
+                        if !unexposed_failures.is_empty() {
+                            let failed_names: Vec<String> = unexposed_failures
+                                .iter()
+                                .map(|definition| format!("'{}'", definition.name))
+                                .collect();
+
+                            return Err(anyhow::anyhow!(
+                                "Cannot resolve component dependencies: {}",
+                                failed_names.join(", ")
+                            ));
+                        }
+
+                        // All remaining failures were exposed components - continue
+                        break;
                     }
                 }
                 None => {
@@ -202,53 +318,46 @@ impl CapabilityRegistryBuilder {
             attempts += 1;
         }
 
-        Ok(CapabilityRegistry::new(
-            self.runtime_capabilities,
-            self.component_capabilities,
-        ))
+        Ok(ComponentRegistry::new(self.components))
     }
 }
 
-async fn create_capability_registry(
-    definitions: Vec<CapabilityDefinition>,
-) -> Result<CapabilityRegistry> {
-    let mut builder = CapabilityRegistryBuilder::new();
-    for def in definitions {
-        if def.uri.starts_with("wasmtime:") {
-            let interfaces = get_interfaces_for_runtime_capability(&def.uri);
-            let runtime_capability = RuntimeCapability {
-                uri: def.uri.clone(),
-                exposed: def.exposed,
-                interfaces,
-            };
-            builder.add_runtime_capability(def.name.clone(), runtime_capability);
-        } else {
-            builder.add_pending_component_capability_definition(def);
-        }
+async fn create_runtime_feature_registry(
+    runtime_feature_definitions: Vec<RuntimeFeatureDefinition>,
+) -> Result<RuntimeFeatureRegistry> {
+    let mut runtime_features = HashMap::new();
+
+    for def in runtime_feature_definitions {
+        let interfaces = get_interfaces_for_runtime_feature(&def.uri);
+        let runtime_feature = RuntimeFeature {
+            uri: def.uri.clone(),
+            enables: def.enables.clone(),
+            interfaces,
+        };
+        runtime_features.insert(def.name.clone(), runtime_feature);
     }
+
+    Ok(RuntimeFeatureRegistry::new(runtime_features))
+}
+
+async fn create_component_registry(
+    component_definitions: Vec<ComponentDefinition>,
+    runtime_feature_registry: &RuntimeFeatureRegistry,
+) -> Result<ComponentRegistry> {
+    let mut builder = ComponentRegistryBuilder::new();
+
+    // Add runtime features for dependency resolution
+    builder.runtime_features = runtime_feature_registry.runtime_features.clone();
+
+    // Add all component definitions to pending queue
+    for def in component_definitions {
+        builder.add_pending_component_definition(def);
+    }
+
     builder.build_registry().await
 }
 
-async fn create_tool_registry(
-    definitions: Vec<ToolDefinition>,
-    capability_registry: &CapabilityRegistry,
-) -> Result<ToolRegistry> {
-    let mut tool_registry = HashMap::new();
-    for def in definitions {
-        match process_tool_definition(&def, capability_registry).await {
-            Ok(spec) => {
-                tool_registry.insert(def.name.clone(), spec);
-            }
-            Err(e) => {
-                eprintln!("Warning: Skipping tool '{}' due to error: {e}", def.name);
-                continue;
-            }
-        }
-    }
-    Ok(tool_registry)
-}
-
-fn get_interfaces_for_runtime_capability(uri: &str) -> Vec<String> {
+fn get_interfaces_for_runtime_feature(uri: &str) -> Vec<String> {
     match uri {
         "wasmtime:http" => vec![
             "wasi:http/outgoing-handler@0.2.3".to_string(),
@@ -289,111 +398,20 @@ fn get_interfaces_for_runtime_capability(uri: &str) -> Vec<String> {
             "wasi:sockets/udp-create-socket@0.2.3".to_string(),
         ],
         _ => {
-            println!("Unknown runtime capability URI: {uri}");
+            println!("Unknown runtime feature URI: {uri}");
             vec![]
         }
     }
 }
 
-async fn resolve_component_capability_from_definition(
-    definition: &CapabilityDefinition,
-    capability_registry: &CapabilityRegistry,
-) -> Result<ComponentCapability> {
-    if definition.uri.starts_with("wasmtime:") {
-        return Err(anyhow::anyhow!(
-            "Wasmtime capability '{}' should not be resolved as component",
-            definition.name
-        ));
-    }
-    let component_spec = process_capability_definition(definition, capability_registry).await?;
-    let exports = component_spec.exports.clone();
-    Ok(ComponentCapability {
-        component: component_spec,
-        exposed: definition.exposed,
-        exports,
-    })
-}
-
-async fn process_capability_definition(
-    definition: &CapabilityDefinition,
-    capability_registry: &CapabilityRegistry,
+async fn process_component(
+    definition: &ComponentDefinition,
+    runtime_feature_registry: &RuntimeFeatureRegistry,
+    component_registry: &ComponentRegistry,
 ) -> Result<ComponentSpec> {
-    let component_spec = process_component_core(
-        &definition.name,
-        &definition.uri,
-        &definition.config,
-        &definition.capabilities,
-        capability_registry,
-        false, // is_tool
-    )
-    .await?;
-    for dependency_name in &definition.capabilities {
-        if capability_registry
-            .get_component_capability(dependency_name)
-            .is_some()
-        {
-            println!(
-                "Composed capability '{}' with dependency '{dependency_name}'",
-                definition.name
-            );
-        }
-    }
-    Ok(component_spec)
-}
+    let mut bytes = read_bytes(&definition.uri).await?;
 
-async fn process_tool_definition(
-    definition: &ToolDefinition,
-    capability_registry: &CapabilityRegistry,
-) -> Result<ComponentSpec> {
-    for capability_name in &definition.capabilities {
-        if capability_registry
-            .get_exposed_runtime_capability(capability_name)
-            .is_none()
-            && capability_registry
-                .get_exposed_component_capability(capability_name)
-                .is_none()
-        {
-            return Err(anyhow::anyhow!(
-                "Tool '{}' requested unavailable capability '{}'",
-                definition.name,
-                capability_name
-            ));
-        }
-    }
-    let component_spec = process_component_core(
-        &definition.name,
-        &definition.uri,
-        &definition.config,
-        &definition.capabilities,
-        capability_registry,
-        true, // is_tool
-    )
-    .await?;
-    for capability_name in &definition.capabilities {
-        if capability_registry
-            .get_exposed_component_capability(capability_name)
-            .is_some()
-        {
-            println!(
-                "Composed tool '{}' with capability '{capability_name}'",
-                definition.name
-            );
-        }
-    }
-    Ok(component_spec)
-}
-
-async fn process_component_core(
-    name: &str,
-    uri: &str,
-    config: &Option<HashMap<String, serde_json::Value>>,
-    capabilities: &[CapabilityName],
-    capability_registry: &CapabilityRegistry,
-    is_tool: bool,
-) -> Result<ComponentSpec> {
-    let mut bytes = read_bytes(uri).await?;
-
-    let (mut imports, exports, functions) = Parser::parse(&bytes, is_tool)
+    let (metadata, mut imports, exports, functions) = Parser::parse(&bytes, definition.exposed)
         .map_err(|e| anyhow::anyhow!("Failed to parse component: {}", e))?;
 
     let imports_config = imports
@@ -401,109 +419,108 @@ async fn process_component_core(
         .any(|import| import.starts_with("wasi:config/store"));
 
     if imports_config {
-        let config_to_use = match config {
+        let config_to_use = match &definition.config {
             Some(c) => c,
             None => &HashMap::new(),
         };
         bytes = Composer::compose_with_config(&bytes, config_to_use).map_err(|e| {
             anyhow::anyhow!(
-                "Failed to compose {} '{}' with config: {}",
-                if is_tool { "tool" } else { "capability" },
-                name,
+                "Failed to compose component '{}' with config: {}",
+                definition.name,
                 e
             )
         })?;
-        imports.retain(|import| !import.starts_with("wasi:config/store"));
-    } else if config.is_some() {
+
+        let config_keys: Vec<_> = config_to_use.keys().collect();
         println!(
-            "Warning: Config provided for {} '{}' but component doesn't import wasi:config/store",
-            if is_tool { "tool" } else { "capability" },
-            name
+            "Composed component '{}' with config: {config_keys:?}",
+            definition.name
+        );
+
+        imports.retain(|import| !import.starts_with("wasi:config/store"));
+    } else if definition.config.is_some() {
+        println!(
+            "Warning: Config provided for component '{}' but component doesn't import wasi:config/store",
+            definition.name
         );
     }
 
-    validate_imports(&imports, capabilities, capability_registry, is_tool)?;
+    let mut remaining_expects = Vec::new();
+    let mut all_runtime_features = HashSet::new();
 
-    let mut remaining_capabilities = Vec::new();
-    let mut all_runtime_capabilities = HashSet::new();
+    for dependency_name in &definition.expects {
+        if let Some(component_spec) = component_registry.get_enabled_component_dependency(
+            definition,
+            &metadata,
+            dependency_name,
+        ) {
+            bytes = Composer::compose_components(&bytes, &component_spec.bytes).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to compose component '{}' with dependency '{}': {}",
+                    definition.name,
+                    dependency_name,
+                    e
+                )
+            })?;
 
-    for capability_name in capabilities {
-        let component_capability = if is_tool {
-            capability_registry.get_exposed_component_capability(capability_name)
-        } else {
-            capability_registry.get_component_capability(capability_name)
-        };
-
-        if let Some(component_capability) = component_capability {
-            bytes = Composer::compose_components(&bytes, &component_capability.component.bytes)
-                .map_err(|e| {
-                    if is_tool {
-                        anyhow::anyhow!(
-                            "Failed to compose tool '{}' with capability '{}': {}",
-                            name,
-                            capability_name,
-                            e
-                        )
-                    } else {
-                        anyhow::anyhow!(
-                            "Failed to compose capability '{}' with dependency '{}': {}",
-                            name,
-                            capability_name,
-                            e
-                        )
-                    }
-                })?;
-
-            // Merge runtime capabilities from composed dependency capability
-            all_runtime_capabilities.extend(
-                component_capability
-                    .component
-                    .runtime_capabilities
-                    .iter()
-                    .cloned(),
-            );
-        } else {
-            let runtime_capability = if is_tool {
-                capability_registry.get_exposed_runtime_capability(capability_name)
-            } else {
-                capability_registry.get_runtime_capability(capability_name)
-            };
-
-            if runtime_capability.is_some() {
-                // Runtime capability - keep for later linker setup
-                remaining_capabilities.push(capability_name.clone());
-            } else {
-                return Err(anyhow::anyhow!(
-                    "{} '{}' requested unavailable {} '{}'",
-                    if is_tool { "Tool" } else { "Capability" },
-                    name,
-                    if is_tool { "capability" } else { "dependency" },
-                    capability_name
-                ));
-            }
-        }
-    }
-
-    if imports_config {
-        if let Some(config) = config {
-            let config_keys: Vec<_> = config.keys().collect();
             println!(
-                "Composed {} '{}' with config: {config_keys:?}",
-                if is_tool { "tool" } else { "capability" },
-                name
+                "Composed component '{}' with dependency '{}'",
+                definition.name, dependency_name
             );
+
+            // Track satisfied imports from this dependency
+            for export in &component_spec.exports {
+                imports.retain(|import| import != export);
+            }
+
+            // Merge runtime expects from composed dependency component
+            all_runtime_features.extend(component_spec.runtime_features.iter().cloned());
+        } else if let Some(_runtime_feature) =
+            runtime_feature_registry.get_enabled_runtime_feature(definition, dependency_name)
+        {
+            // Runtime feature dependency - keep for later context/linker setup
+            remaining_expects.push(dependency_name.clone());
+        } else {
+            return Err(anyhow::anyhow!(
+                "Component '{}' requested unavailable dependency '{}'",
+                definition.name,
+                dependency_name
+            ));
         }
     }
 
-    // Merge direct runtime capabilities with composed ones
-    all_runtime_capabilities.extend(remaining_capabilities);
+    // Merge direct runtime expects with composed ones
+    all_runtime_features.extend(remaining_expects);
+
+    let runtime_interfaces: std::collections::HashSet<String> = all_runtime_features
+        .iter()
+        .filter_map(|name| runtime_feature_registry.get_runtime_feature(name))
+        .flat_map(|rf| rf.interfaces.iter().cloned())
+        .collect();
+
+    // Check for imports not satisfied by runtime features
+    let unsatisfied: Vec<_> = imports
+        .iter()
+        .filter(|import| !runtime_interfaces.contains(*import))
+        .cloned()
+        .collect();
+
+    if !unsatisfied.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Component '{}' has unsatisfied imports: {:?}",
+            definition.name,
+            unsatisfied
+        ));
+    }
 
     Ok(ComponentSpec {
-        name: name.to_string(),
+        name: definition.name.clone(),
+        namespace: metadata.namespace,
+        package: metadata.package,
         bytes,
         imports,
         exports,
-        runtime_capabilities: all_runtime_capabilities.into_iter().collect(),
+        runtime_features: all_runtime_features.into_iter().collect(),
         functions,
     })
 }
@@ -532,59 +549,4 @@ async fn read_bytes(uri: &str) -> Result<Vec<u8>> {
         };
         Ok(std::fs::read(path)?)
     }
-}
-
-/// Validate that component only imports interfaces covered by requested capabilities
-fn validate_imports(
-    component_imports: &[String],
-    requested_capabilities: &[CapabilityName],
-    capability_registry: &CapabilityRegistry,
-    is_tool: bool,
-) -> Result<()> {
-    let expected_interfaces = get_expected_interfaces_from_capabilities(
-        requested_capabilities,
-        capability_registry,
-        is_tool,
-    );
-
-    // Check that all component imports are covered by expected interfaces
-    for import in component_imports {
-        if !expected_interfaces.contains(import) {
-            return Err(anyhow::anyhow!(
-                "Component imports unauthorized interface '{}' - must request appropriate capability",
-                import
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn get_expected_interfaces_from_capabilities(
-    capabilities: &[CapabilityName],
-    capability_registry: &CapabilityRegistry,
-    is_tool: bool,
-) -> std::collections::HashSet<String> {
-    let mut interfaces = std::collections::HashSet::new();
-    for capability_name in capabilities {
-        // Use get_runtime_capability even for is_tool (not get_exposed_runtime_capability) because:
-        // 1. The tool definition was already checked against exposed runtime capabilities
-        // 2. Here we are gathering all runtime capabilities expected by composed components
-        // 3. The wasmtime linker needs to know those capabilities when instantiating the component
-        if let Some(runtime_capability) =
-            capability_registry.get_runtime_capability(capability_name)
-        {
-            interfaces.extend(runtime_capability.interfaces.iter().cloned());
-        }
-
-        // Add exported interfaces from component capabilities
-        let component_capability = if is_tool {
-            capability_registry.get_exposed_component_capability(capability_name)
-        } else {
-            capability_registry.get_component_capability(capability_name)
-        };
-        if let Some(component_capability) = component_capability {
-            interfaces.extend(component_capability.exports.iter().cloned());
-        }
-    }
-    interfaces
 }

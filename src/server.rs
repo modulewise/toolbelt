@@ -3,7 +3,7 @@ use rmcp::{
     ServerHandler,
     model::{
         CallToolRequestParam, CallToolResult, Content, JsonObject, ListToolsResult,
-        PaginatedRequestParam, ServerCapabilities, ServerInfo,
+        PaginatedRequestParam, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -13,27 +13,26 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::mapper::McpMapper;
-use crate::registry::CapabilityRegistry;
-use crate::registry::ComponentSpec;
-use crate::registry::ToolRegistry;
+use crate::registry::{ComponentRegistry, ComponentSpec, RuntimeFeatureRegistry};
 use crate::runtime::Invoker;
 use crate::wit::Function;
-use rmcp::model::Tool;
 
 #[derive(Clone)]
 pub struct ComponentServer {
     tools: HashMap<String, (Tool, Function, ComponentSpec)>,
     invoker: Invoker,
-    capability_registry: CapabilityRegistry,
+    runtime_feature_registry: RuntimeFeatureRegistry,
 }
 
 impl ComponentServer {
     pub fn new(
-        capability_registry: CapabilityRegistry,
-        tool_registry: ToolRegistry,
+        runtime_feature_registry: RuntimeFeatureRegistry,
+        component_registry: ComponentRegistry,
     ) -> Result<Self> {
         let mut tools = HashMap::new();
-        for (_name, spec) in tool_registry {
+
+        // Process components as tools
+        for spec in component_registry.get_components() {
             if let Some(functions_map) = &spec.functions {
                 let functions: Vec<Function> = functions_map.values().cloned().collect();
                 let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &spec.name)?;
@@ -48,7 +47,7 @@ impl ComponentServer {
                     tool_count,
                     if tool_count == 1 { "tool" } else { "tools" },
                     spec.name,
-                    spec.runtime_capabilities
+                    spec.runtime_features
                 );
             } else {
                 // This should not happen for tools, but handle gracefully
@@ -59,7 +58,7 @@ impl ComponentServer {
         Ok(Self {
             tools,
             invoker,
-            capability_registry,
+            runtime_feature_registry,
         })
     }
 
@@ -118,8 +117,8 @@ impl ComponentServer {
             .invoker
             .invoke(
                 &spec.bytes,
-                &spec.runtime_capabilities,
-                &self.capability_registry,
+                &spec.runtime_features,
+                &self.runtime_feature_registry,
                 function.clone(),
                 json_args,
             )

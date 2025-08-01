@@ -1,6 +1,3 @@
-use crate::loader::CapabilityName;
-use crate::registry::CapabilityRegistry;
-use crate::wit::Function;
 use anyhow::Result;
 use wasmtime::{
     Cache, Config, Engine, Store,
@@ -11,6 +8,9 @@ use wasmtime_wasi::{
     p2::{IoView, WasiCtx, WasiCtxBuilder, WasiView},
 };
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
+
+use crate::registry::RuntimeFeatureRegistry;
+use crate::wit::Function;
 
 pub struct ComponentState {
     pub wasi_ctx: WasiCtx,
@@ -34,7 +34,7 @@ impl WasiHttpView for ComponentState {
     fn ctx(&mut self) -> &mut WasiHttpCtx {
         self.wasi_http_ctx
             .as_mut()
-            .expect("Component requires 'http' capability, so HTTP context should be available")
+            .expect("Component requires 'http' feature, so HTTP context should be available")
     }
 }
 
@@ -56,17 +56,17 @@ impl Invoker {
 
     fn create_linker(
         &self,
-        capabilities: &[CapabilityName],
-        capability_registry: &CapabilityRegistry,
+        runtime_features: &[String],
+        runtime_feature_registry: &RuntimeFeatureRegistry,
     ) -> Result<Linker<ComponentState>> {
         let mut linker = Linker::new(&self.engine);
 
-        // Add WASI interfaces based on explicitly requested capabilities
-        for capability_name in capabilities {
-            if let Some(runtime_capability) =
-                capability_registry.get_runtime_capability(capability_name)
+        // Add WASI interfaces based on explicitly requested runtime_features
+        for feature_name in runtime_features {
+            if let Some(runtime_feature) =
+                runtime_feature_registry.get_runtime_feature(feature_name)
             {
-                match runtime_capability.uri.as_str() {
+                match runtime_feature.uri.as_str() {
                     "wasmtime:wasip2" => {
                         // Comprehensive WASI Preview 2 support
                         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
@@ -78,18 +78,18 @@ impl Invoker {
                         wasmtime_wasi_io::add_to_linker_async(&mut linker)?;
                     }
                     "wasmtime:inherit-network" | "wasmtime:allow-ip-name-lookup" => {
-                        // These capabilities are handled in WASI context, not linker
+                        // These runtime_features are handled in WASI context, not linker
                         // No linker functions to add, only context configuration
                     }
                     _ => {
                         println!(
-                            "Unknown runtime capability for linker: {}",
-                            runtime_capability.uri
+                            "Unknown runtime feature for linker: {}",
+                            runtime_feature.uri
                         );
                     }
                 }
             }
-            // Component capabilities are handled during composition, not at runtime
+            // Component runtime_features are handled during composition, not at runtime
         }
         Ok(linker)
     }
@@ -97,8 +97,8 @@ impl Invoker {
     pub async fn invoke(
         &self,
         bytes: &[u8],
-        capabilities: &[CapabilityName],
-        capability_registry: &CapabilityRegistry,
+        runtime_features: &[String],
+        runtime_feature_registry: &RuntimeFeatureRegistry,
         function: Function,
         args: Vec<serde_json::Value>,
     ) -> Result<serde_json::Value> {
@@ -106,15 +106,15 @@ impl Invoker {
 
         let interface_str = function.interface().as_str();
         let function_name = function.function_name();
-        let linker = self.create_linker(capabilities, capability_registry)?;
+        let linker = self.create_linker(runtime_features, runtime_feature_registry)?;
         let mut wasi_builder = WasiCtxBuilder::new();
 
-        // Process wasmtime capabilities for WASI context
-        for capability_name in capabilities {
-            if let Some(runtime_capability) =
-                capability_registry.get_runtime_capability(capability_name)
+        // Process wasmtime runtime_features for WASI context
+        for feature_name in runtime_features {
+            if let Some(runtime_feature) =
+                runtime_feature_registry.get_runtime_feature(feature_name)
             {
-                if let Some(wasmtime_feature) = runtime_capability.uri.strip_prefix("wasmtime:") {
+                if let Some(wasmtime_feature) = runtime_feature.uri.strip_prefix("wasmtime:") {
                     match wasmtime_feature {
                         "inherit-network" => {
                             wasi_builder.inherit_network();
@@ -123,7 +123,7 @@ impl Invoker {
                             wasi_builder.allow_ip_name_lookup(true);
                         }
                         "http" => {
-                            // HTTP capability only adds linker functions, no WASI context changes
+                            // HTTP feature only adds linker functions, no WASI context changes
                         }
                         _ => {}
                     }
@@ -133,10 +133,10 @@ impl Invoker {
 
         let wasi = wasi_builder.build();
 
-        // Check if any capability requires HTTP context
-        let needs_http = capabilities.iter().any(|capability_name| {
-            capability_registry
-                .get_runtime_capability(capability_name)
+        // Check if any feature requires HTTP context
+        let needs_http = runtime_features.iter().any(|feature_name| {
+            runtime_feature_registry
+                .get_runtime_feature(feature_name)
                 .and_then(|cap| cap.uri.strip_prefix("wasmtime:"))
                 == Some("http")
         });

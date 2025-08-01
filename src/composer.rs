@@ -26,7 +26,6 @@ impl Composer {
         let socket_package_id = graph.register_package(socket_package)?;
         let plug_package_id = graph.register_package(plug_package)?;
 
-        // compose plug component into socket component
         wac_graph::plug(&mut graph, vec![plug_package_id], socket_package_id)?;
 
         let encode_options = EncodeOptions {
