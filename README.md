@@ -4,7 +4,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that e
 
 **This is currently an early-stage non-production prototype.**
 
-(auth, observability, and OCI support are on the roadmap)
+(auth and observability are on the roadmap)
 
 ## Build
 
@@ -21,93 +21,106 @@ cargo install --path .
 That will build the binary with the `release` profile and add
 it to your cargo bin directory which should be on your PATH.
 
-## Run
+## Run Simple Components
 
-One or more `.wasm` files may be provided as command line arguments (see [example-components](https://github.com/modulewise/example-components)):
-
-```sh
-toolbelt oci://ghcr.io/modulewise/hello:0.1.0
-```
-
-By default, components operate in a least-privilege capability mode.
-If your component requires capabilities from the host runtime, you can
-specify those capabilities in a `.toml` file (the `exposed` flag means
-they are available to tools, otherwise they are only available as
-dependencies for other capabilities):
-
-`capabilities.toml:`
-```toml
-[wasip2]
-uri = "wasmtime:wasip2"
-exposed = true
-
-[http]
-uri = "wasmtime:http"
-exposed = true
-```
-
-And then define the tool component in its own `.toml` file:
-
-`flights.toml`
-```toml
-[flights]
-uri = "file:///path/to/flight-search.wasm"
-capabilities = ["wasip2", "http"]
-```
-
-Pass the capability and tool files to the server instead of direct `.wasm` files:
+Provide the path to one or more `.wasm` files as command line arguments:
 
 ```sh
-toolbelt -c capabilities.toml -t flights.toml
+toolbelt hello.wasm calculator.wasm
+```
+
+Or you can specify OCI URIs for published Wasm Components, such as these:
+
+```sh
+toolbelt oci://ghcr.io/modulewise/hello:0.1.0 oci://ghcr.io/modulewise/calculator:0.1.0
 ```
 
 > [!TIP]
 >
-> Multiple components can be defined within a single `.toml` file, and capabilities are optional (uri is required).
-> Available host runtime capabilities are: `wasip2`, `http`, `io`, `inherit-network`, and `allow-ip-name-lookup`
+> If you'd like to build the Wasm Components locally, clone the
+> [example-components](https://github.com/modulewise/example-components)
+> project and run the build script as described in its README.
 
-Wasm Components can also be registered as capabilities, and they may have their own capability dependencies.
-(Notice that the lower-level capabilities are not `exposed` to tools):
+## Run Components with Dependencies
 
-`runtime-capabilities.toml`
+By default, components operate in a least-privilege capability mode.
+If your component requires features from the host runtime, you can
+specify those features in a `.toml` file. The `enables` property
+indicates the scope within which they will be available:
+
 ```toml
 [wasip2]
 uri = "wasmtime:wasip2"
+enables = "any"
+
+[http]
+uri = "wasmtime:http"
+enables = "any"
+```
+
+And then define the "exposed" tool component that "expects" those features:
+
+```toml
+[flights]
+uri = "file:///path/to/flight-search.wasm"
+expects = ["wasip2", "http"]
+exposed = true
+```
+
+Pass the definition file to the server instead of direct `.wasm` files:
+
+```sh
+toolbelt flights.toml
+```
+
+Wasm Components can also be defined to enable other components, and they may have their own dependencies.
+Notice this time the runtime features are not directly available to exposed "tool" components, but only
+to the *internal* components that are enabling exposed components:
+
+`runtime-features.toml`
+```toml
+[wasip2]
+uri = "wasmtime:wasip2"
+enables = "unexposed"
 
 [inherit-network]
 uri = "wasmtime:inherit-network"
+enables = "unexposed"
 ```
 
-Those runtime capabilities are then required by a component capability:
+Those runtime features are then expected by an enabling component:
 
 `keyvalue.toml`
 ```toml
 [keyvalue]
 uri = "../example-components/lib/valkey-client.wasm"
-capabilities = ["wasip2", "inherit-network"]
-exposed = true
+expects = ["wasip2", "inherit-network"]
+enables = "exposed"
 ```
 
-And then that higher-level capability can be composed into tool components:
+Finally, that component can be composed into exposed "tool" components.
+In this case, the exposed component will also be composed with config:
 
 `incrementor.toml`
 ```toml
 [incrementor]
 uri = "../example-components/lib/incrementor.wasm"
-capabilities = ["keyvalue"]
+expects = ["keyvalue"]
+exposed = true
 
 [incrementor.config]
-bucket = "things"
+bucket = "increments"
 ```
 
-Multiple capability and tool files can be passed to the server:
+Now these files can all be passed to the server:
 
 ```sh
-toolbelt -c runtime-capabilities.toml -c keyvalue.toml -t incrementor.toml
+toolbelt runtime-features.toml keyvalue.toml incrementor.toml
 ```
 
-This allows for various combinations of reusable capability sets and tool sets.
-It also promotes separation of concerns.
+This allows for various combinations of runtime features, enabling components,
+and components that will be exposed as tools. It also promotes responsibility-driven
+separation of concerns between supporting infrastructure and exposed functionality.
 
 ## Test with MCP Inspector
 
