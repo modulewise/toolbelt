@@ -3,16 +3,10 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-mod composer;
-mod loader;
 mod mapper;
-mod registry;
-mod runtime;
 mod server;
-mod wit;
 
-use loader::load_definitions;
-use registry::build_registries;
+use composable_runtime::{build_registries, load_definitions};
 use server::ComponentServer;
 
 #[derive(Parser)]

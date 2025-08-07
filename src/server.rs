@@ -13,9 +13,9 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::mapper::McpMapper;
-use crate::registry::{ComponentRegistry, ComponentSpec, RuntimeFeatureRegistry};
-use crate::runtime::Invoker;
-use crate::wit::Function;
+use composable_runtime::{
+    ComponentRegistry, ComponentSpec, Function, Invoker, RuntimeFeatureRegistry,
+};
 
 #[derive(Clone)]
 pub struct ComponentServer {
