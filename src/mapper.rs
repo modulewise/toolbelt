@@ -3,7 +3,7 @@ use rmcp::model::Tool;
 use serde_json::json;
 use std::collections::HashMap;
 
-use crate::wit::Function;
+use composable_runtime::Function;
 
 /// Mapper that converts core types to MCP Tools
 pub struct McpMapper;
