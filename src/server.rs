@@ -107,9 +107,9 @@ impl ComponentServer {
             if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
                 if properties.len() == 1 {
                     if let Some((property_name, property_schema)) = properties.iter().next() {
-                        if property_schema.get("type").and_then(|t| t.as_str()) == Some("array") {
-                            return serde_json::json!({ property_name: parsed_result });
-                        } else if property_schema.get("oneOf").is_some() {
+                        if property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
+                            || property_schema.get("oneOf").is_some()
+                        {
                             return serde_json::json!({ property_name: parsed_result });
                         }
                     }
