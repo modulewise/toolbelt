@@ -90,12 +90,41 @@ impl ComponentServer {
         Ok(())
     }
 
+    fn result_to_structured_content(
+        &self,
+        tool: &Tool,
+        raw_result: serde_json::Value,
+    ) -> serde_json::Value {
+        let parsed_result = if raw_result.is_string() {
+            serde_json::from_str::<serde_json::Value>(raw_result.as_str().unwrap())
+                .unwrap_or(raw_result)
+        } else {
+            raw_result
+        };
+
+        // Check if this is a wrapper schema (array or option) and wrap accordingly
+        if let Some(schema) = &tool.output_schema {
+            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
+                if properties.len() == 1 {
+                    if let Some((property_name, property_schema)) = properties.iter().next() {
+                        if property_schema.get("type").and_then(|t| t.as_str()) == Some("array") {
+                            return serde_json::json!({ property_name: parsed_result });
+                        } else if property_schema.get("oneOf").is_some() {
+                            return serde_json::json!({ property_name: parsed_result });
+                        }
+                    }
+                }
+            }
+        }
+        parsed_result
+    }
+
     async fn handle_tool_call(
         &self,
         tool_name: &str,
         arguments: &JsonObject,
     ) -> Result<CallToolResult> {
-        let (_tool, function, spec) = self
+        let (tool, function, spec) = self
             .tools
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
@@ -125,12 +154,28 @@ impl ComponentServer {
             .await
         {
             Ok(result) => {
-                let result_text = if result.is_string() {
-                    result.as_str().unwrap_or("").to_string()
+                if tool.output_schema.is_some() {
+                    let structured_content = self.result_to_structured_content(tool, result);
+
+                    // Per MCP spec: "For backwards compatibility, a tool that returns structured content
+                    // SHOULD also return the serialized JSON in a TextContent block."
+                    // https://modelcontextprotocol.io/specification/2025-06-18/server/tools#structured-content
+                    let text_content = serde_json::to_string_pretty(&structured_content)
+                        .unwrap_or_else(|_| structured_content.to_string());
+
+                    Ok(CallToolResult {
+                        content: Some(vec![Content::text(text_content)]),
+                        is_error: Some(false),
+                        structured_content: Some(structured_content),
+                    })
                 } else {
-                    serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
-                };
-                Ok(CallToolResult::success(vec![Content::text(result_text)]))
+                    let result_text = if result.is_string() {
+                        result.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
+                    };
+                    Ok(CallToolResult::success(vec![Content::text(result_text)]))
+                }
             }
             Err(error) => Ok(CallToolResult::error(vec![Content::text(
                 error.to_string(),
