@@ -48,7 +48,12 @@ impl McpMapper {
             let mut required = Vec::new();
 
             for param in function.params() {
-                let mut param_schema = param.json_schema.clone();
+                let mut param_schema = if param.is_optional {
+                    Self::flatten_schema_if_possible(&param.json_schema)
+                } else {
+                    param.json_schema.clone()
+                };
+
                 if let serde_json::Value::Object(ref mut schema_obj) = param_schema {
                     schema_obj.insert(
                         "description".to_string(),
@@ -78,6 +83,28 @@ impl McpMapper {
             tools.push(tool);
         }
         Ok(tools)
+    }
+
+    fn flatten_schema_if_possible(schema: &serde_json::Value) -> serde_json::Value {
+        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array()) {
+            if one_of.len() == 2 {
+                let mut null_count = 0;
+                let mut non_null_variant = None;
+                for variant in one_of {
+                    if variant.get("type") == Some(&json!("null")) {
+                        null_count += 1;
+                    } else {
+                        non_null_variant = Some(variant.clone());
+                    }
+                }
+                if null_count == 1 {
+                    if let Some(variant) = non_null_variant {
+                        return variant;
+                    }
+                }
+            }
+        }
+        schema.clone()
     }
 
     fn create_output_schema(function: &Function) -> Option<rmcp::model::JsonObject> {

@@ -132,7 +132,21 @@ impl ComponentServer {
         // Prepare arguments in parameter order
         let mut json_args = Vec::new();
         for param in function.params() {
-            if let Some(value) = arguments.get(&param.name) {
+            if param.is_optional {
+                if let Some(value) = arguments.get(&param.name) {
+                    // Handle empty strings for optional non-string parameters
+                    let is_string_type =
+                        param.json_schema.get("type") == Some(&serde_json::json!("string"));
+                    let processed_value = if value == &serde_json::json!("") && !is_string_type {
+                        serde_json::Value::Null
+                    } else {
+                        value.clone()
+                    };
+                    json_args.push(processed_value);
+                } else {
+                    json_args.push(serde_json::Value::Null);
+                }
+            } else if let Some(value) = arguments.get(&param.name) {
                 json_args.push(value.clone());
             } else {
                 return Err(anyhow::anyhow!(
