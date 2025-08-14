@@ -32,14 +32,14 @@ toolbelt hello.wasm calculator.wasm
 Or you can specify OCI URIs for published Wasm Components, such as these:
 
 ```sh
-toolbelt oci://ghcr.io/modulewise/hello:0.1.0 oci://ghcr.io/modulewise/calculator:0.1.0
+toolbelt oci://ghcr.io/modulewise/demos/hello:0.1.0 oci://ghcr.io/modulewise/demos/calculator:0.1.0
 ```
 
 > [!TIP]
 >
 > If you'd like to build the Wasm Components locally, clone the
-> [example-components](https://github.com/modulewise/example-components)
-> project and run the build script as described in its README.
+> [modulewise/demos](https://github.com/modulewise/demos) project and follow the build instructions in
+> [components/README.md](https://github.com/modulewise/demos/blob/main/components/README.md)
 
 ## Run Components with Dependencies
 
@@ -93,7 +93,7 @@ Those runtime features are then expected by an enabling component:
 `keyvalue.toml`
 ```toml
 [keyvalue]
-uri = "../example-components/lib/valkey-client.wasm"
+uri = "../demos/components/lib/valkey-client.wasm"
 expects = ["wasip2", "inherit-network"]
 enables = "exposed"
 ```
@@ -104,7 +104,7 @@ In this case, the exposed component will also be composed with config:
 `incrementor.toml`
 ```toml
 [incrementor]
-uri = "../example-components/lib/incrementor.wasm"
+uri = "../demos/components/lib/incrementor.wasm"
 expects = ["keyvalue"]
 exposed = true
 
