@@ -32,7 +32,8 @@ toolbelt hello.wasm calculator.wasm
 Or you can specify OCI URIs for published Wasm Components, such as these:
 
 ```sh
-toolbelt oci://ghcr.io/modulewise/demos/hello:0.1.0 oci://ghcr.io/modulewise/demos/calculator:0.1.0
+toolbelt oci://ghcr.io/modulewise/demo/hello:0.1.0 \
+         oci://ghcr.io/modulewise/demo/calculator:0.1.0
 ```
 
 > [!TIP]
