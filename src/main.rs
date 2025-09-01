@@ -32,9 +32,8 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
-    let (runtime_feature_definitions, component_definitions) = load_definitions(&cli.definitions)?;
-    let (runtime_feature_registry, component_registry) =
-        build_registries(runtime_feature_definitions, component_definitions).await?;
+    let graph = load_definitions(&cli.definitions)?;
+    let (runtime_feature_registry, component_registry) = build_registries(&graph).await?;
 
     let server = ComponentServer::new(runtime_feature_registry, component_registry)?;
     server.run(addr).await?;
