@@ -178,9 +178,10 @@ impl ComponentServer {
                         .unwrap_or_else(|_| structured_content.to_string());
 
                     Ok(CallToolResult {
-                        content: Some(vec![Content::text(text_content)]),
+                        content: vec![Content::text(text_content)],
                         is_error: Some(false),
                         structured_content: Some(structured_content),
+                        meta: None,
                     })
                 } else {
                     let result_text = if result.is_string() {
@@ -238,6 +239,9 @@ impl ServerHandler for ComponentServer {
             server_info: rmcp::model::Implementation {
                 name: "modulewise-toolbelt".to_string(),
                 version: "0.1.0".to_string(),
+                icons: None,
+                title: Some("Modulewise Toolbelt".to_string()),
+                website_url: Some("https://github.com/modulewise/toolbelt".to_string()),
             },
             instructions: Some(format!(
                 "Use the {} available tools to invoke the underlying Wasm Components. \
