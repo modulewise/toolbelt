@@ -74,11 +74,13 @@ impl McpMapper {
             });
 
             let tool = Tool {
-                name: tool_name.into(),
+                name: tool_name.clone().into(),
                 description: Some(description.into()),
                 input_schema: input_schema.as_object().unwrap().clone().into(),
                 output_schema: Self::create_output_schema(&function).map(|s| s.into()),
                 annotations: None,
+                icons: None,
+                title: Some(tool_name.clone()),
             };
             tools.push(tool);
         }
