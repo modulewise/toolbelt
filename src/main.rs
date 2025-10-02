@@ -6,7 +6,7 @@ use std::path::PathBuf;
 mod mapper;
 mod server;
 
-use composable_runtime::{build_registries, load_definitions};
+use composable_runtime::{Runtime, load_definitions};
 use server::ComponentServer;
 
 #[derive(Parser)]
@@ -33,9 +33,9 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
     let graph = load_definitions(&cli.definitions)?;
-    let (runtime_feature_registry, component_registry) = build_registries(&graph).await?;
+    let runtime = Runtime::from_graph(&graph).await?;
 
-    let server = ComponentServer::new(runtime_feature_registry, component_registry)?;
+    let server = ComponentServer::new(runtime)?;
     server.run(addr).await?;
     Ok(())
 }

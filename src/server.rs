@@ -13,53 +13,38 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use crate::mapper::McpMapper;
-use composable_runtime::{
-    ComponentRegistry, ComponentSpec, Function, Invoker, RuntimeFeatureRegistry,
-};
+use composable_runtime::{Function, Runtime};
+
+type ComponentName = String;
 
 #[derive(Clone)]
 pub struct ComponentServer {
-    tools: HashMap<String, (Tool, Function, ComponentSpec)>,
-    invoker: Invoker,
-    runtime_feature_registry: RuntimeFeatureRegistry,
+    tools: HashMap<String, (Tool, Function, ComponentName)>,
+    runtime: Runtime,
 }
 
 impl ComponentServer {
-    pub fn new(
-        runtime_feature_registry: RuntimeFeatureRegistry,
-        component_registry: ComponentRegistry,
-    ) -> Result<Self> {
+    pub fn new(runtime: Runtime) -> Result<Self> {
         let mut tools = HashMap::new();
 
         // Process components as tools
-        for spec in component_registry.get_components() {
-            if let Some(functions_map) = &spec.functions {
-                let functions: Vec<Function> = functions_map.values().cloned().collect();
-                let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &spec.name)?;
+        for component in runtime.list_components() {
+            let functions: Vec<Function> = component.functions.values().cloned().collect();
+            let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &component.name)?;
 
-                // Store tools with disambiguated tool names as keys
-                for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
-                    tools.insert(tool.name.to_string(), (tool, function, spec.clone()));
-                }
-                let tool_count = functions_map.len();
-                println!(
-                    "Loaded {} {} from '{}' with runtime capabilities: {:?}",
-                    tool_count,
-                    if tool_count == 1 { "tool" } else { "tools" },
-                    spec.name,
-                    spec.runtime_features
-                );
-            } else {
-                // This should not happen for tools, but handle gracefully
-                eprintln!("Warning: Tool component '{}' has no functions", spec.name);
+            // Store tools with disambiguated tool names as keys
+            for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
+                tools.insert(tool.name.to_string(), (tool, function, component.name.clone()));
             }
+            let tool_count = component.functions.len();
+            println!(
+                "Loaded {} {} from '{}'",
+                tool_count,
+                if tool_count == 1 { "tool" } else { "tools" },
+                component.name
+            );
         }
-        let invoker = Invoker::new()?;
-        Ok(Self {
-            tools,
-            invoker,
-            runtime_feature_registry,
-        })
+        Ok(Self { tools, runtime })
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
@@ -124,7 +109,7 @@ impl ComponentServer {
         tool_name: &str,
         arguments: &JsonObject,
     ) -> Result<CallToolResult> {
-        let (tool, function, spec) = self
+        let (tool, function, component_name) = self
             .tools
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
@@ -157,14 +142,8 @@ impl ComponentServer {
         }
 
         match self
-            .invoker
-            .invoke(
-                &spec.bytes,
-                &spec.runtime_features,
-                &self.runtime_feature_registry,
-                function.clone(),
-                json_args,
-            )
+            .runtime
+            .invoke(component_name, function.function_name(), json_args)
             .await
         {
             Ok(result) => {
