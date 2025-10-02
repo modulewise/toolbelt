@@ -34,7 +34,10 @@ impl ComponentServer {
 
             // Store tools with disambiguated tool names as keys
             for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
-                tools.insert(tool.name.to_string(), (tool, function, component.name.clone()));
+                tools.insert(
+                    tool.name.to_string(),
+                    (tool, function, component.name.clone()),
+                );
             }
             let tool_count = component.functions.len();
             println!(
@@ -112,7 +115,7 @@ impl ComponentServer {
         let (tool, function, component_name) = self
             .tools
             .get(tool_name)
-            .ok_or_else(|| anyhow::anyhow!("Tool not found: {}", tool_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Tool not found: {tool_name}"))?;
 
         // Prepare arguments in parameter order
         let mut json_args = Vec::new();
