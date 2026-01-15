@@ -63,22 +63,22 @@ impl McpMapper {
     }
 
     fn flatten_schema_if_possible(schema: &serde_json::Value) -> serde_json::Value {
-        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array()) {
-            if one_of.len() == 2 {
-                let mut null_count = 0;
-                let mut non_null_variant = None;
-                for variant in one_of {
-                    if variant.get("type") == Some(&json!("null")) {
-                        null_count += 1;
-                    } else {
-                        non_null_variant = Some(variant.clone());
-                    }
+        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array())
+            && one_of.len() == 2
+        {
+            let mut null_count = 0;
+            let mut non_null_variant = None;
+            for variant in one_of {
+                if variant.get("type") == Some(&json!("null")) {
+                    null_count += 1;
+                } else {
+                    non_null_variant = Some(variant.clone());
                 }
-                if null_count == 1 {
-                    if let Some(variant) = non_null_variant {
-                        return variant;
-                    }
-                }
+            }
+            if null_count == 1
+                && let Some(variant) = non_null_variant
+            {
+                return variant;
             }
         }
         schema.clone()
@@ -133,14 +133,12 @@ impl McpMapper {
         array_schema: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
         // Extract the item type name from the array schema
-        if let Some(items) = array_schema.get("items") {
-            if let Some(items_obj) = items.as_object() {
-                if let Some(title) = items_obj.get("title") {
-                    if let Some(type_name) = title.as_str() {
-                        return Self::pluralize(type_name);
-                    }
-                }
-            }
+        if let Some(items) = array_schema.get("items")
+            && let Some(items_obj) = items.as_object()
+            && let Some(title) = items_obj.get("title")
+            && let Some(type_name) = title.as_str()
+        {
+            return Self::pluralize(type_name);
         }
         // Fallback to generic name if no title found
         "items".to_string()
@@ -156,10 +154,10 @@ impl McpMapper {
             format!("{singular}es")
         } else if singular.ends_with("y") && singular.len() > 1 {
             let chars: Vec<char> = singular.chars().collect();
-            if let Some(penultimate) = chars.get(chars.len() - 2) {
-                if !"aeiou".contains(*penultimate) {
-                    return format!("{}ies", &singular[..singular.len() - 1]);
-                }
+            if let Some(penultimate) = chars.get(chars.len() - 2)
+                && !"aeiou".contains(*penultimate)
+            {
+                return format!("{}ies", &singular[..singular.len() - 1]);
             }
             format!("{singular}s")
         } else {

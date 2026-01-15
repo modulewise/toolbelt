@@ -87,18 +87,14 @@ impl ComponentServer {
         };
 
         // Check if this is a wrapper schema (array or option) and wrap accordingly
-        if let Some(schema) = &tool.output_schema {
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-                if properties.len() == 1 {
-                    if let Some((property_name, property_schema)) = properties.iter().next() {
-                        if property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
-                            || property_schema.get("oneOf").is_some()
-                        {
-                            return serde_json::json!({ property_name: parsed_result });
-                        }
-                    }
-                }
-            }
+        if let Some(schema) = &tool.output_schema
+            && let Some(properties) = schema.get("properties").and_then(|p| p.as_object())
+            && properties.len() == 1
+            && let Some((property_name, property_schema)) = properties.iter().next()
+            && (property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
+                || property_schema.get("oneOf").is_some())
+        {
+            return serde_json::json!({ property_name: parsed_result });
         }
         parsed_result
     }
