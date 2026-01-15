@@ -9,7 +9,7 @@ pub struct McpMapper;
 impl McpMapper {
     /// Convert a Function to an MCP Tool
     pub fn function_to_tool(function: &Function, component_name: &str) -> Tool {
-        let tool_name = format!("{}_{}", component_name, function.key().replace('.', "_"));
+        let tool_name = format!("{}.{}", component_name, function.key());
 
         let description = if function.docs().is_empty() {
             format!(
