@@ -1,7 +1,5 @@
-use anyhow::Result;
 use rmcp::model::Tool;
 use serde_json::json;
-use std::collections::HashMap;
 
 use composable_runtime::Function;
 
@@ -9,101 +7,78 @@ use composable_runtime::Function;
 pub struct McpMapper;
 
 impl McpMapper {
-    /// Convert wit::Function objects to MCP Tool objects
-    pub fn functions_to_tools(functions: Vec<Function>, component_name: &str) -> Result<Vec<Tool>> {
-        let mut tools = Vec::new();
+    /// Convert a Function to an MCP Tool
+    pub fn function_to_tool(function: &Function, component_name: &str) -> Tool {
+        let tool_name = format!("{}.{}", component_name, function.key());
 
-        // Check for function name conflicts to determine if disambiguation is needed
-        let mut function_counts: HashMap<String, u32> = HashMap::new();
-        for func in &functions {
-            *function_counts
-                .entry(func.function_name().to_string())
-                .or_insert(0) += 1;
-        }
-        let requires_disambiguation = function_counts.values().any(|&count| count > 1);
+        let description = if function.docs().is_empty() {
+            format!(
+                "Call {} function from {} component",
+                function.function_name(),
+                component_name
+            )
+        } else {
+            function.docs().to_string()
+        };
 
-        for function in functions {
-            let tool_name = if requires_disambiguation {
-                format!(
-                    "{}_{}_{}",
-                    component_name,
-                    function.interface().interface_name(),
-                    function.function_name()
-                )
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for param in function.params() {
+            let mut param_schema = if param.is_optional {
+                Self::flatten_schema_if_possible(&param.json_schema)
             } else {
-                format!("{}_{}", component_name, function.function_name())
+                param.json_schema.clone()
             };
 
-            let description = if function.docs().is_empty() {
-                format!(
-                    "Call {} function from {} component",
-                    function.function_name(),
-                    component_name
-                )
-            } else {
-                function.docs().to_string()
-            };
-
-            let mut properties = serde_json::Map::new();
-            let mut required = Vec::new();
-
-            for param in function.params() {
-                let mut param_schema = if param.is_optional {
-                    Self::flatten_schema_if_possible(&param.json_schema)
-                } else {
-                    param.json_schema.clone()
-                };
-
-                if let serde_json::Value::Object(ref mut schema_obj) = param_schema {
-                    schema_obj.insert(
-                        "description".to_string(),
-                        serde_json::Value::String(format!("Parameter: {}", param.name)),
-                    );
-                }
-                properties.insert(param.name.clone(), param_schema);
-                if !param.is_optional {
-                    required.push(param.name.clone());
-                }
+            if let serde_json::Value::Object(ref mut schema_obj) = param_schema {
+                schema_obj.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(format!("Parameter: {}", param.name)),
+                );
             }
-
-            let input_schema = json!({
-                "type": "object",
-                "properties": properties,
-                "required": required,
-                "additionalProperties": false
-            });
-
-            let tool = Tool {
-                name: tool_name.clone().into(),
-                description: Some(description.into()),
-                input_schema: input_schema.as_object().unwrap().clone().into(),
-                output_schema: Self::create_output_schema(&function).map(|s| s.into()),
-                annotations: None,
-                icons: None,
-                title: Some(tool_name.clone()),
-            };
-            tools.push(tool);
+            properties.insert(param.name.clone(), param_schema);
+            if !param.is_optional {
+                required.push(param.name.clone());
+            }
         }
-        Ok(tools)
+
+        let input_schema = json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
+        });
+
+        Tool {
+            name: tool_name.clone().into(),
+            description: Some(description.into()),
+            input_schema: input_schema.as_object().unwrap().clone().into(),
+            output_schema: Self::create_output_schema(function).map(|s| s.into()),
+            annotations: None,
+            icons: None,
+            title: Some(tool_name),
+            meta: None,
+        }
     }
 
     fn flatten_schema_if_possible(schema: &serde_json::Value) -> serde_json::Value {
-        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array()) {
-            if one_of.len() == 2 {
-                let mut null_count = 0;
-                let mut non_null_variant = None;
-                for variant in one_of {
-                    if variant.get("type") == Some(&json!("null")) {
-                        null_count += 1;
-                    } else {
-                        non_null_variant = Some(variant.clone());
-                    }
+        if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array())
+            && one_of.len() == 2
+        {
+            let mut null_count = 0;
+            let mut non_null_variant = None;
+            for variant in one_of {
+                if variant.get("type") == Some(&json!("null")) {
+                    null_count += 1;
+                } else {
+                    non_null_variant = Some(variant.clone());
                 }
-                if null_count == 1 {
-                    if let Some(variant) = non_null_variant {
-                        return variant;
-                    }
-                }
+            }
+            if null_count == 1
+                && let Some(variant) = non_null_variant
+            {
+                return variant;
             }
         }
         schema.clone()
@@ -158,14 +133,12 @@ impl McpMapper {
         array_schema: &serde_json::Map<String, serde_json::Value>,
     ) -> String {
         // Extract the item type name from the array schema
-        if let Some(items) = array_schema.get("items") {
-            if let Some(items_obj) = items.as_object() {
-                if let Some(title) = items_obj.get("title") {
-                    if let Some(type_name) = title.as_str() {
-                        return Self::pluralize(type_name);
-                    }
-                }
-            }
+        if let Some(items) = array_schema.get("items")
+            && let Some(items_obj) = items.as_object()
+            && let Some(title) = items_obj.get("title")
+            && let Some(type_name) = title.as_str()
+        {
+            return Self::pluralize(type_name);
         }
         // Fallback to generic name if no title found
         "items".to_string()
@@ -181,10 +154,10 @@ impl McpMapper {
             format!("{singular}es")
         } else if singular.ends_with("y") && singular.len() > 1 {
             let chars: Vec<char> = singular.chars().collect();
-            if let Some(penultimate) = chars.get(chars.len() - 2) {
-                if !"aeiou".contains(*penultimate) {
-                    return format!("{}ies", &singular[..singular.len() - 1]);
-                }
+            if let Some(penultimate) = chars.get(chars.len() - 2)
+                && !"aeiou".contains(*penultimate)
+            {
+                return format!("{}ies", &singular[..singular.len() - 1]);
             }
             format!("{singular}s")
         } else {

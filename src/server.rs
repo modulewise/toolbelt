@@ -27,16 +27,12 @@ impl ComponentServer {
     pub fn new(runtime: Runtime) -> Result<Self> {
         let mut tools = HashMap::new();
 
-        // Process components as tools
         for component in runtime.list_components() {
-            let functions: Vec<Function> = component.functions.values().cloned().collect();
-            let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &component.name)?;
-
-            // Store tools with disambiguated tool names as keys
-            for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
+            for function in component.functions.values() {
+                let tool = McpMapper::function_to_tool(function, &component.name);
                 tools.insert(
                     tool.name.to_string(),
-                    (tool, function, component.name.clone()),
+                    (tool, function.clone(), component.name.clone()),
                 );
             }
             let tool_count = component.functions.len();
@@ -91,18 +87,14 @@ impl ComponentServer {
         };
 
         // Check if this is a wrapper schema (array or option) and wrap accordingly
-        if let Some(schema) = &tool.output_schema {
-            if let Some(properties) = schema.get("properties").and_then(|p| p.as_object()) {
-                if properties.len() == 1 {
-                    if let Some((property_name, property_schema)) = properties.iter().next() {
-                        if property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
-                            || property_schema.get("oneOf").is_some()
-                        {
-                            return serde_json::json!({ property_name: parsed_result });
-                        }
-                    }
-                }
-            }
+        if let Some(schema) = &tool.output_schema
+            && let Some(properties) = schema.get("properties").and_then(|p| p.as_object())
+            && properties.len() == 1
+            && let Some((property_name, property_schema)) = properties.iter().next()
+            && (property_schema.get("type").and_then(|t| t.as_str()) == Some("array")
+                || property_schema.get("oneOf").is_some())
+        {
+            return serde_json::json!({ property_name: parsed_result });
         }
         parsed_result
     }
@@ -146,7 +138,7 @@ impl ComponentServer {
 
         match self
             .runtime
-            .invoke(component_name, function.function_name(), json_args)
+            .invoke(component_name, &function.key(), json_args)
             .await
         {
             Ok(result) => {
@@ -211,6 +203,7 @@ impl ServerHandler for ComponentServer {
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
+            meta: None,
         })
     }
 

@@ -3,11 +3,8 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-mod mapper;
-mod server;
-
 use composable_runtime::{Runtime, load_definitions};
-use server::ComponentServer;
+use toolbelt::server::ComponentServer;
 
 #[derive(Parser)]
 #[command(name = "toolbelt")]
