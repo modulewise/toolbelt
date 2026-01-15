@@ -27,16 +27,12 @@ impl ComponentServer {
     pub fn new(runtime: Runtime) -> Result<Self> {
         let mut tools = HashMap::new();
 
-        // Process components as tools
         for component in runtime.list_components() {
-            let functions: Vec<Function> = component.functions.values().cloned().collect();
-            let mcp_tools = McpMapper::functions_to_tools(functions.clone(), &component.name)?;
-
-            // Store tools with disambiguated tool names as keys
-            for (tool, function) in mcp_tools.into_iter().zip(functions.into_iter()) {
+            for function in component.functions.values() {
+                let tool = McpMapper::function_to_tool(function, &component.name);
                 tools.insert(
                     tool.name.to_string(),
-                    (tool, function, component.name.clone()),
+                    (tool, function.clone(), component.name.clone()),
                 );
             }
             let tool_count = component.functions.len();
@@ -146,7 +142,7 @@ impl ComponentServer {
 
         match self
             .runtime
-            .invoke(component_name, function.function_name(), json_args)
+            .invoke(component_name, &function.key(), json_args)
             .await
         {
             Ok(result) => {
@@ -211,6 +207,7 @@ impl ServerHandler for ComponentServer {
         Ok(ListToolsResult {
             tools,
             next_cursor: None,
+            meta: None,
         })
     }
 
