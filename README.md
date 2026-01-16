@@ -32,8 +32,8 @@ toolbelt hello.wasm calculator.wasm
 Or you can specify OCI URIs for published Wasm Components, such as these:
 
 ```sh
-toolbelt oci://ghcr.io/modulewise/demo/hello:0.1.0 \
-         oci://ghcr.io/modulewise/demo/calculator:0.1.0
+toolbelt oci://ghcr.io/modulewise/demo/hello:0.2.0 \
+         oci://ghcr.io/modulewise/demo/calculator:0.2.0
 ```
 
 > [!TIP]
@@ -139,6 +139,6 @@ separation of concerns between supporting infrastructure and exposed functionali
 
 ## License
 
-Copyright (c) 2025 Modulewise Inc and the Modulewise Toolbelt contributors.
+Copyright (c) 2026 Modulewise Inc and the Modulewise Toolbelt contributors.
 
 Apache License v2.0: see [LICENSE](./LICENSE) for details.
