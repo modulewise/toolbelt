@@ -2,8 +2,8 @@ use anyhow::Result;
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParam, CallToolResult, Content, JsonObject, ListToolsResult,
-        PaginatedRequestParam, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -176,7 +176,7 @@ impl ComponentServer {
 impl ServerHandler for ComponentServer {
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
@@ -196,7 +196,7 @@ impl ServerHandler for ComponentServer {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
         let tools = self.tools.values().map(|(t, _, _)| t.clone()).collect();

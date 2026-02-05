@@ -3,7 +3,7 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use composable_runtime::{Runtime, load_definitions};
+use composable_runtime::{ComponentGraph, Runtime};
 use toolbelt::server::ComponentServer;
 
 #[derive(Parser)]
@@ -29,8 +29,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let addr: SocketAddr = format!("{}:{}", cli.host, cli.port).parse()?;
 
-    let graph = load_definitions(&cli.definitions)?;
-    let runtime = Runtime::from_graph(&graph).await?;
+    let mut builder = ComponentGraph::builder();
+    for path in &cli.definitions {
+        builder = builder.load_file(path);
+    }
+    let graph = builder.build()?;
+    let runtime = Runtime::builder(&graph).build().await?;
 
     let server = ComponentServer::new(runtime)?;
     server.run(addr).await?;
