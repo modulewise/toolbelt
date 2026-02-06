@@ -36,19 +36,17 @@ impl ComponentServer {
                 );
             }
             let tool_count = component.functions.len();
-            println!(
-                "Loaded {} {} from '{}'",
-                tool_count,
+            tracing::info!(
+                component = component.name,
+                "Loaded {tool_count} {} from '{}'",
                 if tool_count == 1 { "tool" } else { "tools" },
-                component.name
+                component.name,
             );
         }
         Ok(Self { tools, runtime })
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
-        println!("🔧 Modulewise Toolbelt MCP Server");
-
         let service = StreamableHttpService::new(
             move || Ok(self.clone()),
             LocalSessionManager::default().into(),
@@ -58,16 +56,16 @@ impl ComponentServer {
         let router = axum::Router::new().nest_service("/mcp", service);
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
-        println!("📡 Streamable HTTP endpoint: http://{addr}/mcp");
+        tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
 
         tokio::select! {
             result = axum::serve(tcp_listener, router) => {
                 if let Err(err) = result {
-                    eprintln!("Server error: {err}");
+                    tracing::error!("Server error: {err}");
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("Received Ctrl+C, shutting down...");
+                tracing::info!("Received Ctrl+C, shutting down...");
             }
         }
 
