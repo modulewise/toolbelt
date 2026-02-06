@@ -4875,7 +4875,7 @@ checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
 
 [[package]]
 name = "toolbelt"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4884,8 +4884,11 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
+ "tracing",
  "tracing-subscriber",
+ "wat",
 ]
 
 [[package]]

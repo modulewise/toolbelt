@@ -36,19 +36,17 @@ impl ComponentServer {
                 );
             }
             let tool_count = component.functions.len();
-            println!(
-                "Loaded {} {} from '{}'",
-                tool_count,
+            tracing::info!(
+                component = component.name,
+                "Loaded {tool_count} {} from '{}'",
                 if tool_count == 1 { "tool" } else { "tools" },
-                component.name
+                component.name,
             );
         }
         Ok(Self { tools, runtime })
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
-        println!("🔧 Modulewise Toolbelt MCP Server");
-
         let service = StreamableHttpService::new(
             move || Ok(self.clone()),
             LocalSessionManager::default().into(),
@@ -58,16 +56,16 @@ impl ComponentServer {
         let router = axum::Router::new().nest_service("/mcp", service);
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
-        println!("📡 Streamable HTTP endpoint: http://{addr}/mcp");
+        tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
 
         tokio::select! {
             result = axum::serve(tcp_listener, router) => {
                 if let Err(err) = result {
-                    eprintln!("Server error: {err}");
+                    tracing::error!("Server error: {err}");
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                println!("Received Ctrl+C, shutting down...");
+                tracing::info!("Received Ctrl+C, shutting down...");
             }
         }
 
@@ -99,15 +97,12 @@ impl ComponentServer {
         parsed_result
     }
 
-    async fn handle_tool_call(
-        &self,
-        tool_name: &str,
-        arguments: &JsonObject,
-    ) -> Result<CallToolResult> {
-        let (tool, function, component_name) = self
-            .tools
-            .get(tool_name)
-            .ok_or_else(|| anyhow::anyhow!("Tool not found: {tool_name}"))?;
+    async fn handle_tool_call(&self, tool_name: &str, arguments: &JsonObject) -> CallToolResult {
+        let Some((tool, function, component_name)) = self.tools.get(tool_name) else {
+            return CallToolResult::error(vec![Content::text(format!(
+                "Tool not found: {tool_name}"
+            ))]);
+        };
 
         // Prepare arguments in parameter order
         let mut json_args = Vec::new();
@@ -129,10 +124,10 @@ impl ComponentServer {
             } else if let Some(value) = arguments.get(&param.name) {
                 json_args.push(value.clone());
             } else {
-                return Err(anyhow::anyhow!(
+                return CallToolResult::error(vec![Content::text(format!(
                     "Missing required parameter: {}",
                     param.name
-                ));
+                ))]);
             }
         }
 
@@ -151,24 +146,22 @@ impl ComponentServer {
                     let text_content = serde_json::to_string_pretty(&structured_content)
                         .unwrap_or_else(|_| structured_content.to_string());
 
-                    Ok(CallToolResult {
+                    CallToolResult {
                         content: vec![Content::text(text_content)],
                         is_error: Some(false),
                         structured_content: Some(structured_content),
                         meta: None,
-                    })
+                    }
                 } else {
                     let result_text = if result.is_string() {
                         result.as_str().unwrap_or("").to_string()
                     } else {
                         serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string())
                     };
-                    Ok(CallToolResult::success(vec![Content::text(result_text)]))
+                    CallToolResult::success(vec![Content::text(result_text)])
                 }
             }
-            Err(error) => Ok(CallToolResult::error(vec![Content::text(
-                error.to_string(),
-            )])),
+            Err(error) => CallToolResult::error(vec![Content::text(error.to_string())]),
         }
     }
 }
@@ -180,18 +173,7 @@ impl ServerHandler for ComponentServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let arguments = request.arguments.unwrap_or_default();
-        if self.tools.contains_key(request.name.as_ref()) {
-            self.handle_tool_call(&request.name, &arguments)
-                .await
-                .map_err(|e| {
-                    rmcp::ErrorData::internal_error(format!("Component tool error: {e}"), None)
-                })
-        } else {
-            Err(rmcp::ErrorData::invalid_params(
-                format!("Unknown tool: {}", request.name),
-                None,
-            ))
-        }
+        Ok(self.handle_tool_call(&request.name, &arguments).await)
     }
 
     async fn list_tools(
