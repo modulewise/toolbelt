@@ -11,6 +11,7 @@ use rmcp::{
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::mapper::McpMapper;
 use composable_runtime::{Function, Runtime};
@@ -20,7 +21,7 @@ type ComponentName = String;
 #[derive(Clone)]
 pub struct ComponentServer {
     tools: HashMap<String, (Tool, Function, ComponentName)>,
-    runtime: Runtime,
+    runtime: Arc<Runtime>,
 }
 
 impl ComponentServer {
@@ -43,7 +44,10 @@ impl ComponentServer {
                 component.name,
             );
         }
-        Ok(Self { tools, runtime })
+        Ok(Self {
+            tools,
+            runtime: Arc::new(runtime),
+        })
     }
 
     pub async fn run(self, addr: SocketAddr) -> Result<()> {
@@ -97,6 +101,19 @@ impl ComponentServer {
         parsed_result
     }
 
+    // Coerce a JSON number or boolean to a string when the target WIT type is string.
+    fn coerce_to_string(
+        value: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> serde_json::Value {
+        let is_string_type = schema.get("type") == Some(&serde_json::json!("string"));
+        match (is_string_type, value) {
+            (true, serde_json::Value::Number(n)) => serde_json::Value::String(n.to_string()),
+            (true, serde_json::Value::Bool(b)) => serde_json::Value::String(b.to_string()),
+            _ => value.clone(),
+        }
+    }
+
     async fn handle_tool_call(&self, tool_name: &str, arguments: &JsonObject) -> CallToolResult {
         let Some((tool, function, component_name)) = self.tools.get(tool_name) else {
             return CallToolResult::error(vec![Content::text(format!(
@@ -109,20 +126,21 @@ impl ComponentServer {
         for param in function.params() {
             if param.is_optional {
                 if let Some(value) = arguments.get(&param.name) {
-                    // Handle empty strings for optional non-string parameters
+                    let coerced = Self::coerce_to_string(value, &param.json_schema);
+                    // Treat empty strings as null for optional non-string parameters
                     let is_string_type =
                         param.json_schema.get("type") == Some(&serde_json::json!("string"));
-                    let processed_value = if value == &serde_json::json!("") && !is_string_type {
+                    let processed_value = if coerced == serde_json::json!("") && !is_string_type {
                         serde_json::Value::Null
                     } else {
-                        value.clone()
+                        coerced
                     };
                     json_args.push(processed_value);
                 } else {
                     json_args.push(serde_json::Value::Null);
                 }
             } else if let Some(value) = arguments.get(&param.name) {
-                json_args.push(value.clone());
+                json_args.push(Self::coerce_to_string(value, &param.json_schema));
             } else {
                 return CallToolResult::error(vec![Content::text(format!(
                     "Missing required parameter: {}",

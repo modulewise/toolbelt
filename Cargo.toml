@@ -1,13 +1,13 @@
 [package]
 name = "toolbelt"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-clap = { version = "4.5", features = ["derive"] }
-composable-runtime = { git = "https://github.com/modulewise/composable-runtime", tag = "v0.3.1", default-features = false }
+clap = { version = "4.6", features = ["derive"] }
+composable-runtime = { git = "https://github.com/modulewise/composable-runtime", tag = "v0.4.0", default-features = false }
 rmcp = { version = "0.14", features = ["server", "transport-streamable-http-server", "transport-worker"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"

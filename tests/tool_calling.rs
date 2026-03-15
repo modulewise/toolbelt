@@ -1,17 +1,17 @@
 mod common;
 
-use composable_runtime::{ComponentGraph, Runtime};
+use composable_runtime::Runtime;
 use rmcp::model::CallToolRequestParams;
 use toolbelt::server::ComponentServer;
 
 #[tokio::test]
 async fn test_tool_invocation() {
     let component_wasm = common::add_two_component();
-    let graph = ComponentGraph::builder()
-        .load_file(component_wasm.to_path_buf())
+    let runtime = Runtime::builder()
+        .from_path(component_wasm.to_path_buf())
         .build()
+        .await
         .unwrap();
-    let runtime = Runtime::builder(&graph).build().await.unwrap();
     let server_handler = ComponentServer::new(runtime).unwrap();
 
     let client = common::setup_test_client(server_handler).await;
@@ -57,11 +57,11 @@ async fn test_tool_invocation() {
 #[tokio::test]
 async fn test_missing_required_parameter() {
     let component_wasm = common::add_two_component();
-    let graph = ComponentGraph::builder()
-        .load_file(component_wasm.to_path_buf())
+    let runtime = Runtime::builder()
+        .from_path(component_wasm.to_path_buf())
         .build()
+        .await
         .unwrap();
-    let runtime = Runtime::builder(&graph).build().await.unwrap();
     let server_handler = ComponentServer::new(runtime).unwrap();
 
     let client = common::setup_test_client(server_handler).await;
@@ -88,11 +88,11 @@ async fn test_missing_required_parameter() {
 #[tokio::test]
 async fn test_tool_not_found() {
     let component_wasm = common::add_two_component();
-    let graph = ComponentGraph::builder()
-        .load_file(component_wasm.to_path_buf())
+    let runtime = Runtime::builder()
+        .from_path(component_wasm.to_path_buf())
         .build()
+        .await
         .unwrap();
-    let runtime = Runtime::builder(&graph).build().await.unwrap();
     let server_handler = ComponentServer::new(runtime).unwrap();
 
     let client = common::setup_test_client(server_handler).await;
@@ -140,11 +140,11 @@ async fn test_optional_parameter_handling() {
         )
     "#;
     let component_wasm = common::create_wasm_test_file(wat);
-    let graph = ComponentGraph::builder()
-        .load_file(component_wasm.to_path_buf())
+    let runtime = Runtime::builder()
+        .from_path(component_wasm.to_path_buf())
         .build()
+        .await
         .unwrap();
-    let runtime = Runtime::builder(&graph).build().await.unwrap();
     let server_handler = ComponentServer::new(runtime).unwrap();
 
     let client = common::setup_test_client(server_handler).await;
