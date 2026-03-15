@@ -7,16 +7,19 @@ use composable_runtime::Function;
 pub struct McpMapper;
 
 impl McpMapper {
-    /// Convert a Function to an MCP Tool
-    pub fn function_to_tool(function: &Function, component_name: &str) -> Tool {
-        let tool_name = format!("{}.{}", component_name, function.key());
-
-        let description = if function.docs().is_empty() {
-            format!(
-                "Call {} function from {} component",
-                function.function_name(),
-                component_name
-            )
+    /// Convert a Function to an MCP Tool.
+    ///
+    /// `tool_name` is the name as it will appear to MCP clients.
+    /// `description` overrides the function's docs when provided.
+    pub fn function_to_tool(
+        function: &Function,
+        tool_name: &str,
+        description: Option<&str>,
+    ) -> Tool {
+        let description = if let Some(desc) = description {
+            desc.to_string()
+        } else if function.docs().is_empty() {
+            format!("Call {} function", function.function_name())
         } else {
             function.docs().to_string()
         };
@@ -51,11 +54,11 @@ impl McpMapper {
         });
 
         let mut tool = Tool::new_with_raw(
-            tool_name.clone(),
+            tool_name.to_string(),
             Some(description.into()),
             input_schema.as_object().unwrap().clone(),
         )
-        .with_title(tool_name);
+        .with_title(tool_name.to_string());
 
         if let Some(output_schema) = Self::create_output_schema(function) {
             tool = tool.with_raw_output_schema(output_schema.into());

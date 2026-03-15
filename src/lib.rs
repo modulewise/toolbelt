@@ -1,3 +1,7 @@
+mod config;
 mod mapper;
-pub mod origin;
-pub mod server;
+mod origin;
+mod server;
+mod service;
+
+pub use service::McpGatewayService;
