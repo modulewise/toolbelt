@@ -158,18 +158,7 @@ impl ComponentServer {
                 if tool.output_schema.is_some() {
                     let structured_content = self.result_to_structured_content(tool, result);
 
-                    // Per MCP spec: "For backwards compatibility, a tool that returns structured content
-                    // SHOULD also return the serialized JSON in a TextContent block."
-                    // https://modelcontextprotocol.io/specification/2025-06-18/server/tools#structured-content
-                    let text_content = serde_json::to_string_pretty(&structured_content)
-                        .unwrap_or_else(|_| structured_content.to_string());
-
-                    CallToolResult {
-                        content: vec![Content::text(text_content)],
-                        is_error: Some(false),
-                        structured_content: Some(structured_content),
-                        meta: None,
-                    }
+                    CallToolResult::structured(structured_content)
                 } else {
                     let result_text = if result.is_string() {
                         result.as_str().unwrap_or("").to_string()
@@ -208,22 +197,17 @@ impl ServerHandler for ComponentServer {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: rmcp::model::ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: rmcp::model::Implementation {
-                name: "modulewise-toolbelt".to_string(),
-                version: "0.1.0".to_string(),
-                icons: None,
-                title: Some("Modulewise Toolbelt".to_string()),
-                website_url: Some("https://github.com/modulewise/toolbelt".to_string()),
-            },
-            instructions: Some(format!(
-                "Use the {} available tools to invoke the underlying Wasm Components. \
-                Each tool corresponds to a function exported by a loaded component. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                rmcp::model::Implementation::new("modulewise-toolbelt", env!("CARGO_PKG_VERSION"))
+                    .with_title("Modulewise Toolbelt")
+                    .with_website_url("https://github.com/modulewise/toolbelt"),
+            )
+            .with_instructions(format!(
+                "This server provides {} tools. \
+                Each tool has typed inputs and outputs described by its schema. \
                 Call tools with their required parameters.",
                 self.tools.len()
-            )),
-        }
+            ))
     }
 }

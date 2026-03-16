@@ -39,12 +39,7 @@ async fn test_tool_invocation() {
     assert_eq!(required[0], "x");
 
     // Test call_tool invokes the component
-    let request = CallToolRequestParams {
-        name: tool.name.clone().into(),
-        arguments: Some(args!({"x": 5})),
-        task: None,
-        meta: None,
-    };
+    let request = CallToolRequestParams::new(tool.name.clone()).with_arguments(args!({"x": 5}));
 
     let result = client.call_tool(request).await.unwrap();
     assert!(!result.is_error.unwrap_or(false));
@@ -69,12 +64,7 @@ async fn test_missing_required_parameter() {
     let tools_result = client.list_tools(None).await.unwrap();
     let tool = &tools_result.tools[0];
 
-    let request = CallToolRequestParams {
-        name: tool.name.clone().into(),
-        arguments: Some(args!({})),
-        task: None,
-        meta: None,
-    };
+    let request = CallToolRequestParams::new(tool.name.clone()).with_arguments(args!({}));
 
     let result = client.call_tool(request).await.unwrap();
     assert!(result.is_error.unwrap_or(false));
@@ -97,12 +87,7 @@ async fn test_tool_not_found() {
 
     let client = common::setup_test_client(server_handler).await;
 
-    let request = CallToolRequestParams {
-        name: "nonexistent-tool".into(),
-        arguments: None,
-        task: None,
-        meta: None,
-    };
+    let request = CallToolRequestParams::new("nonexistent-tool");
 
     let result = client.call_tool(request).await.unwrap();
     assert!(result.is_error.unwrap_or(false));
@@ -152,12 +137,7 @@ async fn test_optional_parameter_handling() {
     let tools_result = client.list_tools(None).await.unwrap();
     let tool = &tools_result.tools[0];
 
-    let request = CallToolRequestParams {
-        name: tool.name.clone().into(),
-        arguments: Some(args!({"value": 0})),
-        task: None,
-        meta: None,
-    };
+    let request = CallToolRequestParams::new(tool.name.clone()).with_arguments(args!({"value": 0}));
 
     let result = client.call_tool(request).await.unwrap();
     assert!(!result.is_error.unwrap_or(false));
@@ -167,12 +147,8 @@ async fn test_optional_parameter_handling() {
     assert_eq!(result_value, 42);
 
     // Test with non-zero value echoes back
-    let request = CallToolRequestParams {
-        name: tool.name.clone().into(),
-        arguments: Some(args!({"value": 99})),
-        task: None,
-        meta: None,
-    };
+    let request =
+        CallToolRequestParams::new(tool.name.clone()).with_arguments(args!({"value": 99}));
 
     let result = client.call_tool(request).await.unwrap();
     assert!(!result.is_error.unwrap_or(false));
