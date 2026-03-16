@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::mapper::McpMapper;
+use crate::origin::{OriginPolicy, validate_origin};
 use composable_runtime::{Function, Runtime};
 
 type ComponentName = String;
@@ -50,14 +51,16 @@ impl ComponentServer {
         })
     }
 
-    pub async fn run(self, addr: SocketAddr) -> Result<()> {
+    pub async fn run(self, addr: SocketAddr, origin_policy: OriginPolicy) -> Result<()> {
         let service = StreamableHttpService::new(
             move || Ok(self.clone()),
             LocalSessionManager::default().into(),
             Default::default(),
         );
 
-        let router = axum::Router::new().nest_service("/mcp", service);
+        let router = axum::Router::new().nest_service("/mcp", service).layer(
+            axum::middleware::from_fn_with_state(origin_policy, validate_origin),
+        );
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
         tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
