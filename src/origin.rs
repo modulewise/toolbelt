@@ -35,10 +35,7 @@ impl OriginPolicy {
     /// Build a policy from an explicit `--allowed-origins` value.
     pub fn from_cli(origins: &[String]) -> Self {
         if origins.len() == 1 && origins[0] == "*" {
-            tracing::warn!(
-                "Origin validation disabled (--allowed-origins '*'). \
-                 Ensure authentication is in place for production deployments."
-            );
+            tracing::warn!("Origin validation disabled (--allowed-origins '*').");
             OriginPolicy::AllowAll
         } else {
             OriginPolicy::AllowList(Arc::new(origins.to_vec()))
