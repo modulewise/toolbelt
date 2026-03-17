@@ -50,16 +50,18 @@ impl McpMapper {
             "additionalProperties": false
         });
 
-        Tool {
-            name: tool_name.clone().into(),
-            description: Some(description.into()),
-            input_schema: input_schema.as_object().unwrap().clone().into(),
-            output_schema: Self::create_output_schema(function).map(|s| s.into()),
-            annotations: None,
-            icons: None,
-            title: Some(tool_name),
-            meta: None,
+        let mut tool = Tool::new_with_raw(
+            tool_name.clone(),
+            Some(description.into()),
+            input_schema.as_object().unwrap().clone(),
+        )
+        .with_title(tool_name);
+
+        if let Some(output_schema) = Self::create_output_schema(function) {
+            tool = tool.with_raw_output_schema(output_schema.into());
         }
+
+        tool
     }
 
     fn flatten_schema_if_possible(schema: &serde_json::Value) -> serde_json::Value {

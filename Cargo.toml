@@ -1,14 +1,14 @@
 [package]
 name = "toolbelt"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1"
 axum = "0.8"
-clap = { version = "4.5", features = ["derive"] }
-composable-runtime = { git = "https://github.com/modulewise/composable-runtime", tag = "v0.3.1", default-features = false }
-rmcp = { version = "0.14", features = ["server", "transport-streamable-http-server", "transport-worker"] }
+clap = { version = "4.6", features = ["derive"] }
+composable-runtime = { git = "https://github.com/modulewise/composable-runtime", tag = "v0.4.0", default-features = false }
+rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server", "transport-worker"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -18,4 +18,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 tempfile = "3"
 wat = "1"
-rmcp = { version = "0.14", features = ["client", "server"] }
+rmcp = { version = "1.2", features = ["client", "server"] }
