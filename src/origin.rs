@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 const LOOPBACK_ORIGINS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 
-/// Resolved origin validation policy.
+/// Origin validation policy.
 #[derive(Clone)]
 pub enum OriginPolicy {
     /// Allow any Origin. Used with `--allowed-origins '*'`.
@@ -83,7 +83,6 @@ pub async fn validate_origin(
     }
 }
 
-/// Extract the hostname (without port) from an Origin header value.
 fn extract_hostname(origin: &str) -> Option<String> {
     let after_scheme = origin.split("://").nth(1)?;
     let host_port = after_scheme.split('/').next()?;
