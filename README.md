@@ -45,27 +45,20 @@ toolbelt oci://ghcr.io/modulewise/demo/hello:0.2.0 \
 ## Run Components with Dependencies
 
 By default, components operate in a least-privilege capability mode.
-If your component requires features from the host runtime, you can
-specify those features in a `.toml` file. The `enables` property
-indicates the scope within which they will be available:
+If your component requires capabilities from the host runtime, you can
+specify those capabilities in a `.toml` file:
 
 ```toml
-[wasip2]
-uri = "wasmtime:wasip2"
-enables = "any"
-
-[http]
-uri = "wasmtime:http"
-enables = "any"
+[capability.http]
+type = "wasi:http"
 ```
 
-And then define the "exposed" tool component that "expects" those features:
+And then define the tool component that imports one or more capabilities:
 
 ```toml
-[flights]
+[component.flights]
 uri = "file:///path/to/flight-search.wasm"
-expects = ["wasip2", "http"]
-exposed = true
+imports = ["http"]
 ```
 
 Pass the definition file to the server instead of direct `.wasm` files:
@@ -74,54 +67,39 @@ Pass the definition file to the server instead of direct `.wasm` files:
 toolbelt flights.toml
 ```
 
-Wasm Components can also be defined to enable other components, and they may have their own dependencies.
-Notice this time the runtime features are not directly available to exposed "tool" components, but only
-to the *internal* components that are enabling exposed components:
+Wasm Components can also import other components which may have their own dependencies:
 
-`runtime-features.toml`
+`components.toml`
 ```toml
-[wasip2]
-uri = "wasmtime:wasip2"
-enables = "unexposed"
-
-[inherit-network]
-uri = "wasmtime:inherit-network"
-enables = "unexposed"
-```
-
-Those runtime features are then expected by an enabling component:
-
-`keyvalue.toml`
-```toml
-[keyvalue]
-uri = "../demos/components/lib/valkey-client.wasm"
-expects = ["wasip2", "inherit-network"]
-enables = "exposed"
-```
-
-Finally, that component can be composed into exposed "tool" components.
-In this case, the exposed component will also be composed with config:
-
-`incrementor.toml`
-```toml
-[incrementor]
+[component.incrementor]
 uri = "../demos/components/lib/incrementor.wasm"
-expects = ["keyvalue"]
-exposed = true
+imports = ["keyvalue"]
 
-[incrementor.config]
+[component.incrementor.config]
 bucket = "increments"
+
+[component.keyvalue]
+uri = "../demos/components/lib/valkey-client.wasm"
+imports = ["wasip2"]
 ```
 
-Now these files can all be passed to the server:
+And responsibilities can be separated across multiple files:
+
+`capabilities.toml`
+```toml
+[capability.wasip2]
+type = "wasi:p2"
+```
+
+Now these files can be passed to the server:
 
 ```sh
-toolbelt runtime-features.toml keyvalue.toml incrementor.toml
+toolbelt components.toml capabilities.toml
 ```
 
-This allows for various combinations of runtime features, enabling components,
-and components that will be exposed as tools. It also promotes responsibility-driven
-separation of concerns between supporting infrastructure and exposed functionality.
+This allows for various combinations of host capabilities and guest components.
+It also promotes responsibility-driven separation of concerns between supporting
+infrastructure and domain-centric tools.
 
 ## Test with MCP Inspector
 
