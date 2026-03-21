@@ -169,7 +169,7 @@ description = "Custom description for the greet tool"
 
 ### Origin validation
 
-Toolbelt validates the `Origin` header on all requests per the MCP spec.
+Toolbelt validates the `Origin` header if present on requests per the MCP spec.
 When binding to a loopback address, localhost origins are allowed by default.
 Otherwise, all origins are denied unless explicitly configured:
 
