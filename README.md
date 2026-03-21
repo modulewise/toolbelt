@@ -101,6 +101,86 @@ This allows for various combinations of host capabilities and guest components.
 It also promotes responsibility-driven separation of concerns between supporting
 infrastructure and domain-centric tools.
 
+## Configure the MCP Gateway
+
+When no `[gateway]` is configured, toolbelt starts a default MCP server on
+`127.0.0.1:3001` that auto-discovers top-level components (those not imported
+by other components).
+
+For explicit control, add a `[gateway]` section with `type = "mcp"` to your
+definition file.
+
+### Discover components to expose as tools with a selector
+
+Use `component-selector` to match components by metadata:
+
+```toml
+[gateway.mcp]
+type = "mcp"
+port = 3001
+component-selector = "!dependents"
+```
+
+This exposes all top-level components as tools. Other selector expressions
+are supported, for example `labels.domain=shopping` or `name=greeter`.
+
+### Define tools explicitly
+
+Use `[gateway.mcp.tool.*]` entries to map specific component functions to
+named tools:
+
+```toml
+[gateway.mcp]
+type = "mcp"
+port = 3001
+
+[gateway.mcp.tool.greeter]
+component = "greeter"
+function = "greet"
+description = "Greet someone by name"
+
+[gateway.mcp.tool.adder]
+component = "calculator"
+function = "operations.add"
+```
+
+The tool name comes from the TOML key (`greeter` and `adder` above).
+The function should be qualified by interface if the specified function
+is exported via interface, or directly if exported at the WIT world level.
+The `description` field is optional but plays an important role in providing
+instructions to a calling agent.
+
+### Combine both
+
+Selectors and explicit tools can be used together. Explicit tool definitions
+take precedence on name collisions:
+
+```toml
+[gateway.mcp]
+type = "mcp"
+port = 3001
+component-selector = "!dependents"
+
+[gateway.mcp.tool.greeter]
+component = "greeter"
+function = " greet"
+description = "Custom description for the greet tool"
+```
+
+### Origin validation
+
+Toolbelt validates the `Origin` header on all requests per the MCP spec.
+When binding to a loopback address, localhost origins are allowed by default.
+Otherwise, all origins are denied unless explicitly configured:
+
+```toml
+[gateway.mcp]
+type = "mcp"
+port = 8080
+host = "0.0.0.0"
+allowed-origins = ["app.example.com", "localhost"]
+```
+
 ## Test with MCP Inspector
 
 1. Run the server as described above.
