@@ -715,8 +715,8 @@ dependencies = [
 
 [[package]]
 name = "composable-interceptor"
-version = "0.4.0"
-source = "git+https://github.com/modulewise/composable-runtime?tag=v0.4.0#7f90c7f0eeb81527113156beb90c66c6dcbdf59c"
+version = "0.5.0-alpha.1"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#50f47f160cbd20177f7b1c5f1cbd23b65294cbca"
 dependencies = [
  "anyhow",
  "clap",
@@ -729,9 +729,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "composable-mcp"
+version = "0.5.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "composable-runtime",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wat",
+]
+
+[[package]]
 name = "composable-runtime"
-version = "0.4.0"
-source = "git+https://github.com/modulewise/composable-runtime?tag=v0.4.0#7f90c7f0eeb81527113156beb90c66c6dcbdf59c"
+version = "0.5.0-alpha.1"
+source = "git+https://github.com/modulewise/composable-runtime?branch=main#50f47f160cbd20177f7b1c5f1cbd23b65294cbca"
 dependencies = [
  "anyhow",
  "clap",
@@ -5004,24 +5022,6 @@ name = "toml_writer"
 version = "1.0.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab16f14aed21ee8bfd8ec22513f7287cd4a91aa92e44edfe2c17ddd004e92607"
-
-[[package]]
-name = "toolbelt"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "axum",
- "clap",
- "composable-runtime",
- "rmcp",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wat",
-]
 
 [[package]]
 name = "topological-sort"

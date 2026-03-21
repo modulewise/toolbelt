@@ -12,7 +12,7 @@ const LOOPBACK_ORIGINS: &[&str] = &["localhost", "127.0.0.1", "[::1]"];
 /// Origin validation policy.
 #[derive(Clone)]
 pub enum OriginPolicy {
-    /// Allow any Origin. Used with `--allowed-origins '*'`.
+    /// Allow any Origin. Used with `allowed-origins = "*"`.
     AllowAll,
     /// Allow only these hostnames. Requests with no Origin header always pass.
     AllowList(Arc<Vec<String>>),
@@ -32,13 +32,36 @@ impl OriginPolicy {
         }
     }
 
-    /// Build a policy from an explicit `--allowed-origins` value.
-    pub fn from_cli(origins: &[String]) -> Self {
+    /// Build a policy from an explicit list of allowed origins.
+    pub fn from_list(origins: &[String]) -> Self {
         if origins.len() == 1 && origins[0] == "*" {
-            tracing::warn!("Origin validation disabled (--allowed-origins '*').");
+            tracing::warn!("Origin validation disabled (allowed-origins = '*').");
             OriginPolicy::AllowAll
         } else {
             OriginPolicy::AllowList(Arc::new(origins.to_vec()))
+        }
+    }
+
+    /// Build a policy from config values.
+    /// When `allowed_origins` is `None`, derives a default based on whether the host
+    /// is a loopback address (e.g. "localhost"). Unrecognized hosts default to deny-all.
+    pub fn from_config(allowed_origins: Option<&[String]>, host: &str) -> Self {
+        match allowed_origins {
+            Some(origins) => Self::from_list(origins),
+            None => {
+                if let Ok(addr) = host.parse::<std::net::IpAddr>() {
+                    Self::default_for_addr(addr)
+                } else if host == "localhost" {
+                    Self::default_for_addr(std::net::Ipv4Addr::LOCALHOST.into())
+                } else {
+                    tracing::warn!(
+                        host,
+                        "Cannot determine if host is loopback. Defaulting to deny-all Origin policy. \
+                         Configure 'allowed-origins' explicitly."
+                    );
+                    OriginPolicy::AllowList(Arc::new(Vec::new()))
+                }
+            }
         }
     }
 }
@@ -145,7 +168,50 @@ mod tests {
 
     #[test]
     fn test_wildcard_policy() {
-        let policy = OriginPolicy::from_cli(&["*".to_string()]);
+        let policy = OriginPolicy::from_list(&["*".to_string()]);
         assert!(matches!(policy, OriginPolicy::AllowAll));
+    }
+
+    #[test]
+    fn test_from_config_loopback_ip() {
+        let policy = OriginPolicy::from_config(None, "127.0.0.1");
+        match policy {
+            OriginPolicy::AllowList(list) => {
+                assert!(list.contains(&"localhost".to_string()));
+            }
+            _ => panic!("expected AllowList"),
+        }
+    }
+
+    #[test]
+    fn test_from_config_localhost_name() {
+        let policy = OriginPolicy::from_config(None, "localhost");
+        match policy {
+            OriginPolicy::AllowList(list) => {
+                assert!(list.contains(&"localhost".to_string()));
+            }
+            _ => panic!("expected AllowList"),
+        }
+    }
+
+    #[test]
+    fn test_from_config_unknown_host() {
+        let policy = OriginPolicy::from_config(None, "my-server.example.com");
+        match policy {
+            OriginPolicy::AllowList(list) => assert!(list.is_empty()),
+            _ => panic!("expected empty AllowList"),
+        }
+    }
+
+    #[test]
+    fn test_from_config_explicit_origins() {
+        let origins = vec!["example.com".to_string()];
+        let policy = OriginPolicy::from_config(Some(&origins), "0.0.0.0");
+        match policy {
+            OriginPolicy::AllowList(list) => {
+                assert_eq!(list.as_ref(), &["example.com".to_string()]);
+            }
+            _ => panic!("expected AllowList"),
+        }
     }
 }
