@@ -10,7 +10,7 @@ use composable_runtime::{
 // Default component selector for auto-discovery: top-level components only.
 const DEFAULT_COMPONENT_SELECTOR: &str = "!dependents";
 
-/// Parsed tool within an MCP gateway.
+/// Parsed tool within an MCP server.
 #[derive(Debug, Clone)]
 pub struct ToolConfig {
     pub name: String,
@@ -19,9 +19,9 @@ pub struct ToolConfig {
     pub description: Option<String>,
 }
 
-/// Parsed MCP gateway definition.
+/// Parsed MCP server definition.
 #[derive(Debug, Clone)]
-pub struct McpGatewayConfig {
+pub struct McpServerConfig {
     pub name: String,
     pub host: String,
     pub port: u16,
@@ -30,15 +30,15 @@ pub struct McpGatewayConfig {
     pub tools: Vec<ToolConfig>,
 }
 
-pub type SharedConfig = Arc<Mutex<Vec<McpGatewayConfig>>>;
+pub type SharedConfig = Arc<Mutex<Vec<McpServerConfig>>>;
 
 pub fn shared_config() -> SharedConfig {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Create a default gateway config for auto-discovery of top-level components.
-pub fn default_gateway() -> McpGatewayConfig {
-    McpGatewayConfig {
+/// Create a default server config for auto-discovery of top-level components.
+pub fn default_server() -> McpServerConfig {
+    McpServerConfig {
         name: "mcp".to_string(),
         host: "127.0.0.1".to_string(),
         port: 3001,
@@ -51,21 +51,21 @@ pub fn default_gateway() -> McpGatewayConfig {
     }
 }
 
-/// Claims `[gateway.*]` definitions where `type = "mcp"`.
-pub struct McpGatewayConfigHandler {
-    gateways: SharedConfig,
+/// Claims `[server.*]` definitions where `type = "mcp"`.
+pub struct McpServerConfigHandler {
+    servers: SharedConfig,
 }
 
-impl McpGatewayConfigHandler {
-    pub fn new(gateways: SharedConfig) -> Self {
-        Self { gateways }
+impl McpServerConfigHandler {
+    pub fn new(servers: SharedConfig) -> Self {
+        Self { servers }
     }
 }
 
-impl ConfigHandler for McpGatewayConfigHandler {
+impl ConfigHandler for McpServerConfigHandler {
     fn claimed_categories(&self) -> Vec<CategoryClaim> {
         vec![CategoryClaim::with_selector(
-            "gateway",
+            "server",
             Selector {
                 conditions: vec![Condition {
                     key: "type".to_string(),
@@ -77,7 +77,7 @@ impl ConfigHandler for McpGatewayConfigHandler {
 
     fn claimed_properties(&self) -> HashMap<&str, &[&str]> {
         HashMap::from([(
-            "gateway",
+            "server",
             [
                 "type",
                 "host",
@@ -96,9 +96,9 @@ impl ConfigHandler for McpGatewayConfigHandler {
         name: &str,
         mut properties: PropertyMap,
     ) -> Result<()> {
-        if category != "gateway" {
+        if category != "server" {
             return Err(anyhow::anyhow!(
-                "McpGatewayConfigHandler received unexpected category '{category}'"
+                "McpServerConfigHandler received unexpected category '{category}'"
             ));
         }
 
@@ -110,16 +110,16 @@ impl ConfigHandler for McpGatewayConfigHandler {
                 .as_u64()
                 .and_then(|p| u16::try_from(p).ok())
                 .ok_or_else(|| {
-                    anyhow::anyhow!("Gateway '{name}': 'port' must be a valid port number")
+                    anyhow::anyhow!("Server '{name}': 'port' must be a valid port number")
                 })?,
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{name}': 'port' must be a number, got {got}"
+                    "Server '{name}': 'port' must be a number, got {got}"
                 ));
             }
             None => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{name}' missing required 'port' field"
+                    "Server '{name}' missing required 'port' field"
                 ));
             }
         };
@@ -128,7 +128,7 @@ impl ConfigHandler for McpGatewayConfigHandler {
             Some(serde_json::Value::String(s)) => s,
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{name}': 'host' must be a string, got {got}"
+                    "Server '{name}': 'host' must be a string, got {got}"
                 ));
             }
             None => "127.0.0.1".to_string(),
@@ -142,7 +142,7 @@ impl ConfigHandler for McpGatewayConfigHandler {
                         serde_json::Value::String(s) => origins.push(s),
                         got => {
                             return Err(anyhow::anyhow!(
-                                "Gateway '{name}': 'allowed-origins' items must be strings, got {got}"
+                                "Server '{name}': 'allowed-origins' items must be strings, got {got}"
                             ));
                         }
                     }
@@ -152,7 +152,7 @@ impl ConfigHandler for McpGatewayConfigHandler {
             Some(serde_json::Value::String(s)) if s == "*" => Some(vec!["*".to_string()]),
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{name}': 'allowed-origins' must be an array or '*', got {got}"
+                    "Server '{name}': 'allowed-origins' must be an array or '*', got {got}"
                 ));
             }
             None => None,
@@ -160,11 +160,11 @@ impl ConfigHandler for McpGatewayConfigHandler {
 
         let component_selector = match properties.remove("component-selector") {
             Some(serde_json::Value::String(s)) => Some(Selector::parse(&s).map_err(|e| {
-                anyhow::anyhow!("Gateway '{name}': invalid component-selector '{s}': {e}")
+                anyhow::anyhow!("Server '{name}': invalid component-selector '{s}': {e}")
             })?),
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{name}': 'component-selector' must be a string, got {got}"
+                    "Server '{name}': 'component-selector' must be a string, got {got}"
                 ));
             }
             None => None,
@@ -174,7 +174,7 @@ impl ConfigHandler for McpGatewayConfigHandler {
 
         if component_selector.is_none() && tools.is_empty() {
             return Err(anyhow::anyhow!(
-                "Gateway '{name}' has no tools and no component-selector. \
+                "Server '{name}' has no tools and no component-selector. \
                  At least one must be specified."
             ));
         }
@@ -182,11 +182,11 @@ impl ConfigHandler for McpGatewayConfigHandler {
         if !properties.is_empty() {
             let unknown: Vec<_> = properties.keys().collect();
             return Err(anyhow::anyhow!(
-                "Gateway '{name}' has unknown properties: {unknown:?}"
+                "Server '{name}' has unknown properties: {unknown:?}"
             ));
         }
 
-        self.gateways.lock().unwrap().push(McpGatewayConfig {
+        self.servers.lock().unwrap().push(McpServerConfig {
             name: name.to_string(),
             host,
             port,
@@ -198,12 +198,12 @@ impl ConfigHandler for McpGatewayConfigHandler {
     }
 }
 
-fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<ToolConfig>> {
+fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<ToolConfig>> {
     let tool_table = match properties.remove("tool") {
         Some(serde_json::Value::Object(map)) => map,
         Some(got) => {
             return Err(anyhow::anyhow!(
-                "Gateway '{gateway_name}': 'tool' must be a table, got {got}"
+                "Server '{server_name}': 'tool' must be a table, got {got}"
             ));
         }
         None => return Ok(Vec::new()),
@@ -215,7 +215,7 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
             serde_json::Value::Object(map) => map,
             got => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' must be a table, got {got}"
+                    "Server '{server_name}': tool '{tool_name}' must be a table, got {got}"
                 ));
             }
         };
@@ -224,12 +224,12 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
             Some(serde_json::Value::String(s)) => s,
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' 'component' must be a string, got {got}"
+                    "Server '{server_name}': tool '{tool_name}' 'component' must be a string, got {got}"
                 ));
             }
             None => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' missing required 'component' field"
+                    "Server '{server_name}': tool '{tool_name}' missing required 'component' field"
                 ));
             }
         };
@@ -238,12 +238,12 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
             Some(serde_json::Value::String(s)) => s,
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' 'function' must be a string, got {got}"
+                    "Server '{server_name}': tool '{tool_name}' 'function' must be a string, got {got}"
                 ));
             }
             None => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' missing required 'function' field"
+                    "Server '{server_name}': tool '{tool_name}' missing required 'function' field"
                 ));
             }
         };
@@ -252,7 +252,7 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
             Some(serde_json::Value::String(s)) => Some(s),
             Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Gateway '{gateway_name}': tool '{tool_name}' 'description' must be a string, got {got}"
+                    "Server '{server_name}': tool '{tool_name}' 'description' must be a string, got {got}"
                 ));
             }
             None => None,
@@ -261,7 +261,7 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
         if !tool_props.is_empty() {
             let unknown: Vec<_> = tool_props.keys().collect();
             return Err(anyhow::anyhow!(
-                "Gateway '{gateway_name}': tool '{tool_name}' has unknown properties: {unknown:?}"
+                "Server '{server_name}': tool '{tool_name}' has unknown properties: {unknown:?}"
             ));
         }
 
@@ -280,9 +280,9 @@ fn parse_tools(gateway_name: &str, properties: &mut PropertyMap) -> Result<Vec<T
 mod tests {
     use super::*;
 
-    fn make_handler() -> (McpGatewayConfigHandler, SharedConfig) {
+    fn make_handler() -> (McpServerConfigHandler, SharedConfig) {
         let config = shared_config();
-        let handler = McpGatewayConfigHandler::new(Arc::clone(&config));
+        let handler = McpServerConfigHandler::new(Arc::clone(&config));
         (handler, config)
     }
 
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_basic_gateway() {
+    fn parse_basic_server() {
         let (mut handler, config) = make_handler();
         let properties = props(vec![
             ("type", serde_json::json!("mcp")),
@@ -308,24 +308,24 @@ mod tests {
         ]);
 
         handler
-            .handle_category("gateway", "mcp", properties)
+            .handle_category("server", "mcp", properties)
             .unwrap();
 
-        let gateways = config.lock().unwrap();
-        assert_eq!(gateways.len(), 1);
-        assert_eq!(gateways[0].name, "mcp");
-        assert_eq!(gateways[0].host, "127.0.0.1");
-        assert_eq!(gateways[0].port, 3001);
-        assert!(gateways[0].allowed_origins.is_none());
-        assert_eq!(gateways[0].tools.len(), 1);
-        assert_eq!(gateways[0].tools[0].name, "add-two");
-        assert_eq!(gateways[0].tools[0].component, "math");
-        assert_eq!(gateways[0].tools[0].function, "add-two");
-        assert!(gateways[0].tools[0].description.is_none());
+        let servers = config.lock().unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "mcp");
+        assert_eq!(servers[0].host, "127.0.0.1");
+        assert_eq!(servers[0].port, 3001);
+        assert!(servers[0].allowed_origins.is_none());
+        assert_eq!(servers[0].tools.len(), 1);
+        assert_eq!(servers[0].tools[0].name, "add-two");
+        assert_eq!(servers[0].tools[0].component, "math");
+        assert_eq!(servers[0].tools[0].function, "add-two");
+        assert!(servers[0].tools[0].description.is_none());
     }
 
     #[test]
-    fn parse_gateway_with_all_options() {
+    fn parse_server_with_all_options() {
         let (mut handler, config) = make_handler();
         let properties = props(vec![
             ("type", serde_json::json!("mcp")),
@@ -348,18 +348,18 @@ mod tests {
         ]);
 
         handler
-            .handle_category("gateway", "api", properties)
+            .handle_category("server", "api", properties)
             .unwrap();
 
-        let gateways = config.lock().unwrap();
-        assert_eq!(gateways[0].host, "0.0.0.0");
-        assert_eq!(gateways[0].port, 8080);
+        let servers = config.lock().unwrap();
+        assert_eq!(servers[0].host, "0.0.0.0");
+        assert_eq!(servers[0].port, 8080);
         assert_eq!(
-            gateways[0].allowed_origins.as_deref(),
+            servers[0].allowed_origins.as_deref(),
             Some(["example.com".to_string(), "localhost".to_string()].as_slice())
         );
         assert_eq!(
-            gateways[0].tools[0].description.as_deref(),
+            servers[0].tools[0].description.as_deref(),
             Some("Greet someone by name")
         );
     }
@@ -369,7 +369,7 @@ mod tests {
         let (mut handler, _) = make_handler();
         let properties = props(vec![("type", serde_json::json!("mcp"))]);
 
-        let result = handler.handle_category("gateway", "mcp", properties);
+        let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
         assert!(
             result
@@ -395,7 +395,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("gateway", "mcp", properties);
+        let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
         assert!(
             result
@@ -421,7 +421,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("gateway", "mcp", properties);
+        let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
         assert!(
             result
@@ -439,7 +439,7 @@ mod tests {
             ("port", serde_json::json!(3001)),
         ]);
 
-        let result = handler.handle_category("gateway", "mcp", properties);
+        let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
         assert!(
             result
@@ -459,20 +459,20 @@ mod tests {
         ]);
 
         handler
-            .handle_category("gateway", "mcp", properties)
+            .handle_category("server", "mcp", properties)
             .unwrap();
 
-        let gateways = config.lock().unwrap();
-        assert!(gateways[0].component_selector.is_some());
-        assert!(gateways[0].tools.is_empty());
+        let servers = config.lock().unwrap();
+        assert!(servers[0].component_selector.is_some());
+        assert!(servers[0].tools.is_empty());
     }
 
     #[test]
     fn selector_matches_mcp_type() {
-        let handler = McpGatewayConfigHandler::new(shared_config());
+        let handler = McpServerConfigHandler::new(shared_config());
         let claims = handler.claimed_categories();
         assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].category, "gateway");
+        assert_eq!(claims[0].category, "server");
         assert!(claims[0].selector.is_some());
 
         let selector = claims[0].selector.as_ref().unwrap();
@@ -503,7 +503,7 @@ mod tests {
             ),
         ]);
 
-        let result = handler.handle_category("gateway", "mcp", properties);
+        let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
         assert!(
             result
@@ -524,12 +524,12 @@ mod tests {
         ]);
 
         handler
-            .handle_category("gateway", "mcp", properties)
+            .handle_category("server", "mcp", properties)
             .unwrap();
 
-        let gateways = config.lock().unwrap();
+        let servers = config.lock().unwrap();
         assert_eq!(
-            gateways[0].allowed_origins.as_deref(),
+            servers[0].allowed_origins.as_deref(),
             Some(["*".to_string()].as_slice())
         );
     }
@@ -554,11 +554,11 @@ mod tests {
         ]);
 
         handler
-            .handle_category("gateway", "mcp", properties)
+            .handle_category("server", "mcp", properties)
             .unwrap();
 
-        let gateways = config.lock().unwrap();
-        assert!(gateways[0].component_selector.is_some());
-        assert_eq!(gateways[0].tools.len(), 1);
+        let servers = config.lock().unwrap();
+        assert!(servers[0].component_selector.is_some());
+        assert_eq!(servers[0].tools.len(), 1);
     }
 }

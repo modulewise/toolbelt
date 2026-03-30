@@ -98,16 +98,16 @@ toolbelt components.toml capabilities.toml
 ```
 
 This allows for various combinations of host capabilities and guest components.
-It also promotes responsibility-driven separation of concerns between supporting
-infrastructure and domain-centric tools.
+It also promotes responsibility-driven separation of concerns between
+supporting infrastructure and domain-centric tools.
 
-## Configure the MCP Gateway
+## Configure the MCP Server
 
-When no `[gateway]` is configured, toolbelt starts a default MCP server on
-`127.0.0.1:3001` that auto-discovers top-level components (those not imported
-by other components).
+When no `[server]` with `type = "mcp"` is configured, toolbelt starts a default
+MCP server on `127.0.0.1:3001` that auto-discovers top-level components (those
+not imported by other components).
 
-For explicit control, add a `[gateway]` section with `type = "mcp"` to your
+For explicit control, add a `[server]` section with `type = "mcp"` to your
 definition file.
 
 ### Discover components to expose as tools with a selector
@@ -115,31 +115,31 @@ definition file.
 Use `component-selector` to match components by metadata:
 
 ```toml
-[gateway.mcp]
+[server.mcp]
 type = "mcp"
 port = 3001
 component-selector = "!dependents"
 ```
 
 This exposes all top-level components as tools. Other selector expressions
-are supported, for example `labels.domain=shopping` or `name=greeter`.
+are supported, for example `labels.domain = "shopping"` or `name = "greeter"`.
 
 ### Define tools explicitly
 
-Use `[gateway.mcp.tool.*]` entries to map specific component functions to
+Use `[server.mcp.tool.*]` entries to map specific component functions to
 named tools:
 
 ```toml
-[gateway.mcp]
+[server.mcp]
 type = "mcp"
 port = 3001
 
-[gateway.mcp.tool.greeter]
+[server.mcp.tool.greeter]
 component = "greeter"
 function = "greet"
 description = "Greet someone by name"
 
-[gateway.mcp.tool.adder]
+[server.mcp.tool.adder]
 component = "calculator"
 function = "operations.add"
 ```
@@ -156,12 +156,12 @@ Selectors and explicit tools can be used together. Explicit tool definitions
 take precedence on name collisions:
 
 ```toml
-[gateway.mcp]
+[server.mcp]
 type = "mcp"
 port = 3001
 component-selector = "!dependents"
 
-[gateway.mcp.tool.greeter]
+[server.mcp.tool.greeter]
 component = "greeter"
 function = " greet"
 description = "Custom description for the greet tool"
@@ -174,9 +174,9 @@ When binding to a loopback address, localhost origins are allowed by default.
 Otherwise, all origins are denied unless explicitly configured:
 
 ```toml
-[gateway.mcp]
+[server.mcp]
 type = "mcp"
-port = 8080
+port = 3001
 host = "0.0.0.0"
 allowed-origins = ["app.example.com", "localhost"]
 ```

@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
 
-use composable_mcp::McpGatewayService;
+use composable_mcp::McpService;
 use composable_runtime::Runtime;
 
 #[derive(Parser)]
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
     let runtime = Runtime::builder()
         .from_paths(&cli.definitions)
-        .with_service::<McpGatewayService>()
+        .with_service::<McpService>()
         .build()
         .await?;
 
