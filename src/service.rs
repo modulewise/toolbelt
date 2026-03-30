@@ -9,12 +9,12 @@ use rmcp::model::Tool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::config::{self, McpGatewayConfig, McpGatewayConfigHandler, SharedConfig, ToolConfig};
+use crate::config::{self, McpServerConfig, McpServerConfigHandler, SharedConfig, ToolConfig};
 use crate::mapper::McpMapper;
 use crate::origin::OriginPolicy;
 use crate::server::McpServer;
 
-pub struct McpGatewayService {
+pub struct McpService {
     config: SharedConfig,
     invoker: Mutex<Option<Arc<dyn ComponentInvoker>>>,
     shutdown_tx: watch::Sender<bool>,
@@ -22,7 +22,7 @@ pub struct McpGatewayService {
     tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
-impl Default for McpGatewayService {
+impl Default for McpService {
     fn default() -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
@@ -57,15 +57,15 @@ fn build_tool(
     ))
 }
 
-// Resolve all tools for a gateway from both explicit tool configs and component-selector.
+// Resolve all tools for a server from both explicit tool configs and component-selector.
 fn resolve_tools(
-    gateway: &McpGatewayConfig,
+    server_config: &McpServerConfig,
     invoker: &dyn ComponentInvoker,
 ) -> Result<HashMap<String, (Tool, Function, String)>> {
     let mut tools = HashMap::new();
 
     // Selector-discovered tools first (explicit tools take precedence on collision)
-    if let Some(selector) = &gateway.component_selector {
+    if let Some(selector) = &server_config.component_selector {
         let components = invoker.list_components(Some(selector));
         for component in components {
             for function in component.functions.values() {
@@ -80,13 +80,13 @@ fn resolve_tools(
     }
 
     // Explicit tool configs override selector-discovered tools on name collision
-    for tool_config in &gateway.tools {
+    for tool_config in &server_config.tools {
         let component = invoker
             .get_component(&tool_config.component)
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Gateway '{}': tool '{}' references unknown component '{}'",
-                    gateway.name,
+                    "Server '{}': tool '{}' references unknown component '{}'",
+                    server_config.name,
                     tool_config.name,
                     tool_config.component,
                 )
@@ -99,9 +99,9 @@ fn resolve_tools(
     Ok(tools)
 }
 
-impl Service for McpGatewayService {
+impl Service for McpService {
     fn config_handler(&self) -> Option<Box<dyn ConfigHandler>> {
-        Some(Box::new(McpGatewayConfigHandler::new(Arc::clone(
+        Some(Box::new(McpServerConfigHandler::new(Arc::clone(
             &self.config,
         ))))
     }
@@ -111,7 +111,7 @@ impl Service for McpGatewayService {
     }
 
     fn start(&self) -> Result<()> {
-        let mut gateways = {
+        let mut server_configs = {
             let mut config = self.config.lock().unwrap();
             std::mem::take(&mut *config)
         };
@@ -123,46 +123,48 @@ impl Service for McpGatewayService {
             .clone()
             .expect("set_invoker must be called before start");
 
-        if gateways.is_empty() {
+        if server_configs.is_empty() {
             tracing::info!(
-                "No MCP gateway configured. Starting default on 127.0.0.1:3001 \
+                "No MCP server configured. Starting default on 127.0.0.1:3001 \
                  with auto-discovered top-level components."
             );
-            gateways.push(config::default_gateway());
+            server_configs.push(config::default_server());
         }
 
         let mut handles = Vec::new();
 
-        for gateway in gateways {
-            let tools = resolve_tools(&gateway, &*invoker)?;
+        for server_config in server_configs {
+            let tools = resolve_tools(&server_config, &*invoker)?;
 
             let tool_count = tools.len();
-            let origin_policy =
-                OriginPolicy::from_config(gateway.allowed_origins.as_deref(), &gateway.host);
+            let origin_policy = OriginPolicy::from_config(
+                server_config.allowed_origins.as_deref(),
+                &server_config.host,
+            );
 
-            let addr: SocketAddr = format!("{}:{}", gateway.host, gateway.port)
+            let addr: SocketAddr = format!("{}:{}", server_config.host, server_config.port)
                 .parse()
                 .map_err(|e| {
                     anyhow::anyhow!(
-                        "Gateway '{}': invalid address '{}:{}': {e}",
-                        gateway.name,
-                        gateway.host,
-                        gateway.port,
+                        "Server '{}': invalid address '{}:{}': {e}",
+                        server_config.name,
+                        server_config.host,
+                        server_config.port,
                     )
                 })?;
 
             let server = McpServer::new(tools, Arc::clone(&invoker), addr, origin_policy);
 
             tracing::info!(
-                gateway = gateway.name,
-                "Starting MCP gateway with {tool_count} {}",
+                server_name = server_config.name,
+                "Starting MCP server with {tool_count} {}",
                 if tool_count == 1 { "tool" } else { "tools" },
             );
 
             let shutdown_rx = self.shutdown_rx.clone();
             handles.push(tokio::spawn(async move {
                 if let Err(err) = server.run(shutdown_rx).await {
-                    tracing::error!(gateway = gateway.name, "MCP server error: {err}");
+                    tracing::error!(server_name = server_config.name, "MCP server error: {err}");
                 }
             }));
         }

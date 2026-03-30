@@ -4,4 +4,4 @@ mod origin;
 mod server;
 mod service;
 
-pub use service::McpGatewayService;
+pub use service::McpService;
