@@ -153,7 +153,20 @@ impl Service for McpService {
                     )
                 })?;
 
-            let server = McpServer::new(tools, Arc::clone(&invoker), addr, origin_policy);
+            let tracer_provider = server_config
+                .otlp_endpoint
+                .as_deref()
+                .map(|ep| {
+                    crate::server::build_tracer_provider(
+                        ep,
+                        &server_config.otlp_protocol,
+                        &server_config.name,
+                    )
+                })
+                .transpose()?;
+
+            let server =
+                McpServer::new(tools, Arc::clone(&invoker), addr, origin_policy, tracer_provider);
 
             tracing::info!(
                 server_name = server_config.name,

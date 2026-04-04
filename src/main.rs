@@ -3,6 +3,7 @@ use clap::Parser;
 use std::path::PathBuf;
 
 use composable_mcp::McpService;
+use composable_otel::OtelService;
 use composable_runtime::Runtime;
 
 #[derive(Parser)]
@@ -27,6 +28,7 @@ async fn main() -> Result<()> {
 
     let runtime = Runtime::builder()
         .from_paths(&cli.definitions)
+        .with_service::<OtelService>()
         .with_service::<McpService>()
         .build()
         .await?;

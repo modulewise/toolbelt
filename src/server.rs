@@ -1,8 +1,14 @@
 use anyhow::Result;
+use opentelemetry::trace::{Span, SpanKind, Status, Tracer, TracerProvider as _};
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::{SpanExporter, WithExportConfig};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
+use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
+        CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult, Meta,
         PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
@@ -15,7 +21,7 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::origin::{OriginPolicy, validate_origin};
-use composable_runtime::{ComponentInvoker, Function};
+use composable_runtime::{ComponentInvoker, Function, PROPAGATED_HEADERS};
 
 type ComponentName = String;
 
@@ -25,6 +31,7 @@ pub struct McpServer {
     invoker: Arc<dyn ComponentInvoker>,
     addr: SocketAddr,
     origin_policy: OriginPolicy,
+    tracer_provider: Option<Arc<SdkTracerProvider>>,
 }
 
 impl McpServer {
@@ -33,12 +40,14 @@ impl McpServer {
         invoker: Arc<dyn ComponentInvoker>,
         addr: SocketAddr,
         origin_policy: OriginPolicy,
+        tracer_provider: Option<SdkTracerProvider>,
     ) -> Self {
         Self {
             tools,
             invoker,
             addr,
             origin_policy,
+            tracer_provider: tracer_provider.map(Arc::new),
         }
     }
 
@@ -46,6 +55,8 @@ impl McpServer {
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let addr = self.addr;
         let origin_policy = self.origin_policy.clone();
+        // Keep a handle to the tracer provider for shutdown.
+        let tracer_provider = self.tracer_provider.clone();
 
         let service = StreamableHttpService::new(
             move || Ok(self.clone()),
@@ -53,9 +64,12 @@ impl McpServer {
             Default::default(),
         );
 
-        let router = axum::Router::new().nest_service("/mcp", service).layer(
-            axum::middleware::from_fn_with_state(origin_policy, validate_origin),
-        );
+        let router = axum::Router::new()
+            .nest_service("/mcp", service)
+            .layer(axum::middleware::from_fn_with_state(
+                origin_policy,
+                validate_origin,
+            ));
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
         tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
@@ -69,6 +83,11 @@ impl McpServer {
             _ = shutdown.changed() => {
                 tracing::info!("MCP server on {addr} shutting down");
             }
+        }
+
+        // Shutdown via spawn_blocking since BatchSpanProcessor.shutdown() calls block_on.
+        if let Some(provider) = tracer_provider {
+            let _ = tokio::task::spawn_blocking(move || provider.shutdown()).await;
         }
 
         Ok(())
@@ -112,7 +131,74 @@ impl McpServer {
         }
     }
 
-    async fn handle_tool_call(&self, tool_name: &str, arguments: &JsonObject) -> CallToolResult {
+    /// Create an MCP server span following the gen_ai semantic conventions.
+    /// Returns the span and a propagation context map derived from it.
+    ///
+    /// Trace context is extracted from `_meta`.
+    fn start_mcp_span(
+        &self,
+        method: &str,
+        target: Option<&str>,
+        mut attributes: Vec<KeyValue>,
+        meta: Option<&Meta>,
+    ) -> Option<(opentelemetry_sdk::trace::Span, HashMap<String, String>)> {
+        let tp = self.tracer_provider.as_ref()?;
+        let tracer = tp.tracer("modulewise-toolbelt");
+
+        let span_name = match target {
+            Some(t) => format!("{method} {t}"),
+            None => method.to_string(),
+        };
+
+        // Extract propagated context from _meta (MCP spec trace propagation)
+        let mut context: HashMap<String, String> = HashMap::new();
+        if let Some(m) = meta {
+            for key in PROPAGATED_HEADERS {
+                if let Some(val) = m.0.get(*key).and_then(|v| v.as_str()) {
+                    context.insert(key.to_string(), val.to_string());
+                }
+            }
+        }
+
+        let parent_cx = if context.contains_key("traceparent") {
+            Some(TraceContextPropagator::new().extract(&context))
+        } else {
+            None
+        };
+
+        attributes.push(KeyValue::new("mcp.method.name", method.to_string()));
+
+        let builder = tracer
+            .span_builder(span_name)
+            .with_kind(SpanKind::Server)
+            .with_attributes(attributes);
+
+        let span = match parent_cx {
+            Some(cx) => builder.start_with_context(&tracer, &cx),
+            None => builder.start(&tracer),
+        };
+
+        // Derive traceparent from the span
+        let sc = span.span_context().clone();
+        context.insert(
+            "traceparent".to_string(),
+            format!(
+                "00-{:032x}-{:016x}-{:02x}",
+                sc.trace_id(),
+                sc.span_id(),
+                sc.trace_flags()
+            ),
+        );
+
+        Some((span, context))
+    }
+
+    async fn handle_tool_call(
+        &self,
+        tool_name: &str,
+        arguments: &JsonObject,
+        context: Option<HashMap<String, String>>,
+    ) -> CallToolResult {
         let Some((tool, function, component_name)) = self.tools.get(tool_name) else {
             return CallToolResult::error(vec![Content::text(format!(
                 "Tool not found: {tool_name}"
@@ -149,7 +235,7 @@ impl McpServer {
 
         match self
             .invoker
-            .invoke(component_name, &function.key(), json_args)
+            .invoke(component_name, &function.key(), json_args, context, None)
             .await
         {
             Ok(result) => {
@@ -171,27 +257,105 @@ impl McpServer {
     }
 }
 
+// Extract gen_ai semantic convention attributes from the request context.
+fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
+    let mut attrs = vec![
+        KeyValue::new("jsonrpc.request.id", context.id.to_string()),
+        KeyValue::new("network.transport", "tcp"),
+    ];
+
+    if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
+        if let Some(session_id) = parts.headers.get("MCP-Session-Id").and_then(|v| v.to_str().ok())
+        {
+            attrs.push(KeyValue::new("mcp.session.id", session_id.to_string()));
+        }
+        if let Some(version) = parts
+            .headers
+            .get("MCP-Protocol-Version")
+            .and_then(|v| v.to_str().ok())
+        {
+            attrs.push(KeyValue::new(
+                "mcp.protocol.version",
+                version.to_string(),
+            ));
+        }
+    }
+
+    attrs
+}
+
 impl ServerHandler for McpServer {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tool_name = &request.name;
         let arguments = request.arguments.unwrap_or_default();
-        Ok(self.handle_tool_call(&request.name, &arguments).await)
+
+        // rmcp extracts _meta from params during deserialization and places it
+        // in RequestContext.meta, not in CallToolRequestParams.meta.
+        let meta = if context.meta.0.is_empty() {
+            None
+        } else {
+            Some(&context.meta)
+        };
+
+        let mut attrs = vec![
+            KeyValue::new("gen_ai.operation.name", "execute_tool"),
+            KeyValue::new("gen_ai.tool.name", tool_name.to_string()),
+        ];
+        attrs.extend(request_attributes(&context));
+
+        let span_ctx = self.start_mcp_span("tools/call", Some(tool_name), attrs, meta);
+
+        let context = span_ctx
+            .as_ref()
+            .map(|(_, ctx)| ctx.clone());
+
+        let (mut span, result) = {
+            let result = self
+                .handle_tool_call(tool_name, &arguments, context)
+                .await;
+            (span_ctx.map(|(span, _)| span), result)
+        };
+
+        if let Some(ref mut span) = span {
+            if result.is_error.unwrap_or(false) {
+                span.set_status(Status::error(""));
+                span.set_attribute(KeyValue::new("error.type", "tool_error"));
+            }
+            span.end();
+        }
+
+        Ok(result)
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        let meta = if context.meta.0.is_empty() {
+            None
+        } else {
+            Some(&context.meta)
+        };
+        let span_ctx =
+            self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
+
         let tools = self.tools.values().map(|(t, _, _)| t.clone()).collect();
-        Ok(ListToolsResult {
+        let result = ListToolsResult {
             tools,
             next_cursor: None,
             meta: None,
-        })
+        };
+
+        if let Some((mut span, _)) = span_ctx {
+            span.end();
+        }
+
+        Ok(result)
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -208,6 +372,41 @@ impl ServerHandler for McpServer {
                 self.tools.len()
             ))
     }
+}
+
+pub fn build_tracer_provider(
+    endpoint: &str,
+    protocol: &str,
+    service_name: &str,
+) -> Result<SdkTracerProvider> {
+    let exporter = match protocol {
+        "http/protobuf" => SpanExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint)
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to build span exporter: {e}"))?,
+        _ => {
+            if protocol != "grpc" {
+                tracing::warn!(protocol, "unrecognized OTLP protocol, defaulting to grpc");
+            }
+            SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build span exporter: {e}"))?
+        }
+    };
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_attribute(opentelemetry::KeyValue::new(
+            "service.name",
+            service_name.to_string(),
+        ))
+        .build();
+    let processor = BatchSpanProcessor::builder(exporter).build();
+    Ok(SdkTracerProvider::builder()
+        .with_resource(resource)
+        .with_span_processor(processor)
+        .build())
 }
 
 #[cfg(test)]
@@ -268,7 +467,7 @@ mod tests {
         }
 
         let dummy_addr = "127.0.0.1:0".parse().unwrap();
-        McpServer::new(tools, invoker, dummy_addr, OriginPolicy::AllowAll)
+        McpServer::new(tools, invoker, dummy_addr, OriginPolicy::AllowAll, None)
     }
 
     #[derive(Debug, Clone, Default)]
