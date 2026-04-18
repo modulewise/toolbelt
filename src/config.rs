@@ -28,6 +28,8 @@ pub struct McpServerConfig {
     pub allowed_origins: Option<Vec<String>>,
     pub component_selector: Option<Selector>,
     pub tools: Vec<ToolConfig>,
+    pub otlp_endpoint: Option<String>,
+    pub otlp_protocol: String,
 }
 
 pub type SharedConfig = Arc<Mutex<Vec<McpServerConfig>>>;
@@ -48,6 +50,8 @@ pub fn default_server() -> McpServerConfig {
                 .expect("default component selector is valid"),
         ),
         tools: Vec::new(),
+        otlp_endpoint: None,
+        otlp_protocol: "grpc".to_string(),
     }
 }
 
@@ -84,6 +88,8 @@ impl ConfigHandler for McpServerConfigHandler {
                 "port",
                 "allowed-origins",
                 "component-selector",
+                "otlp-endpoint",
+                "otlp-protocol",
                 "tool",
             ]
             .as_slice(),
@@ -170,6 +176,26 @@ impl ConfigHandler for McpServerConfigHandler {
             None => None,
         };
 
+        let otlp_endpoint = match properties.remove("otlp-endpoint") {
+            Some(serde_json::Value::String(s)) => Some(s),
+            Some(got) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{name}': 'otlp-endpoint' must be a string, got {got}"
+                ));
+            }
+            None => None,
+        };
+
+        let otlp_protocol = match properties.remove("otlp-protocol") {
+            Some(serde_json::Value::String(s)) => s,
+            Some(got) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{name}': 'otlp-protocol' must be a string, got {got}"
+                ));
+            }
+            None => "grpc".to_string(),
+        };
+
         let tools = parse_tools(name, &mut properties)?;
 
         if component_selector.is_none() && tools.is_empty() {
@@ -193,6 +219,8 @@ impl ConfigHandler for McpServerConfigHandler {
             allowed_origins,
             component_selector,
             tools,
+            otlp_endpoint,
+            otlp_protocol,
         });
         Ok(())
     }

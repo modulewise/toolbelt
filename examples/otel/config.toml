@@ -1,0 +1,5 @@
+[server.mcp]
+type = "mcp"
+port = 3001
+otlp-endpoint = "http://localhost:4317"
+component-selector = "!dependents"
