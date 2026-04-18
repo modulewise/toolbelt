@@ -1,0 +1,23 @@
+[server.mcp]
+type = "mcp"
+port = 3001
+
+[server.mcp.tool.add]
+component = "calculator"
+function = "add"
+description = "Add a plus b"
+
+[server.mcp.tool.subtract]
+component = "calculator"
+function = "subtract"
+description = "Subtract b from a"
+
+[server.mcp.tool.multiply]
+component = "calculator"
+function = "multiply"
+description = "Multiply a times b"
+
+[server.mcp.tool.divide]
+component = "calculator"
+function = "divide"
+description = "Divide a by b"
