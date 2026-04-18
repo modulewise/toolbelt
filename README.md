@@ -4,8 +4,6 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that e
 
 **This is currently an early-stage non-production prototype.**
 
-(auth and observability are on the roadmap)
-
 ## Build
 
 Prerequisite: a current [rust toolchain](https://www.rust-lang.org/tools/install)
@@ -180,6 +178,22 @@ port = 3001
 host = "0.0.0.0"
 allowed-origins = ["app.example.com", "localhost"]
 ```
+
+### OpenTelemetry tracing
+
+Add `otlp-endpoint` to export spans via OTLP:
+
+```toml
+[server.mcp]
+type = "mcp"
+port = 3001
+otlp-endpoint = "http://localhost:4317"
+otlp-protocol = "grpc"  # or "http/protobuf"; defaults to "grpc"
+```
+
+Spans are emitted for `tools/list` and `tools/call` with attributes following the [gen_ai MCP semantic conventions](https://opentelemetry.io/docs/specs/semconv/gen-ai/mcp/). Trace context propagates from client to server via `_meta` in request params and from server into Wasm component invocations via `traceparent` in the propagation context.
+
+See [examples/otel](examples/otel) for a complete example with Jaeger.
 
 ## Test with MCP Inspector
 
