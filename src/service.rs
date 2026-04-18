@@ -165,8 +165,13 @@ impl Service for McpService {
                 })
                 .transpose()?;
 
-            let server =
-                McpServer::new(tools, Arc::clone(&invoker), addr, origin_policy, tracer_provider);
+            let server = McpServer::new(
+                tools,
+                Arc::clone(&invoker),
+                addr,
+                origin_policy,
+                tracer_provider,
+            );
 
             tracing::info!(
                 server_name = server_config.name,

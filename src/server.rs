@@ -1,7 +1,7 @@
 use anyhow::Result;
-use opentelemetry::trace::{Span, SpanKind, Status, Tracer, TracerProvider as _};
-use opentelemetry::propagation::TextMapPropagator;
 use opentelemetry::KeyValue;
+use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::{Span, SpanKind, Status, Tracer, TracerProvider as _};
 use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
@@ -64,12 +64,9 @@ impl McpServer {
             Default::default(),
         );
 
-        let router = axum::Router::new()
-            .nest_service("/mcp", service)
-            .layer(axum::middleware::from_fn_with_state(
-                origin_policy,
-                validate_origin,
-            ));
+        let router = axum::Router::new().nest_service("/mcp", service).layer(
+            axum::middleware::from_fn_with_state(origin_policy, validate_origin),
+        );
         let tcp_listener = tokio::net::TcpListener::bind(addr).await?;
 
         tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
@@ -131,10 +128,10 @@ impl McpServer {
         }
     }
 
-    /// Create an MCP server span following the gen_ai semantic conventions.
-    /// Returns the span and a propagation context map derived from it.
-    ///
-    /// Trace context is extracted from `_meta`.
+    // Create an MCP server span following the gen_ai semantic conventions.
+    // Returns the span and a propagation context map derived from it.
+    //
+    // Trace context is extracted from `_meta`.
     fn start_mcp_span(
         &self,
         method: &str,
@@ -150,7 +147,7 @@ impl McpServer {
             None => method.to_string(),
         };
 
-        // Extract propagated context from _meta (MCP spec trace propagation)
+        // Extract propagated context from _meta (MCP spec trace propagation).
         let mut context: HashMap<String, String> = HashMap::new();
         if let Some(m) = meta {
             for key in PROPAGATED_HEADERS {
@@ -178,7 +175,7 @@ impl McpServer {
             None => builder.start(&tracer),
         };
 
-        // Derive traceparent from the span
+        // Derive traceparent from the span.
         let sc = span.span_context().clone();
         context.insert(
             "traceparent".to_string(),
@@ -205,7 +202,7 @@ impl McpServer {
             ))]);
         };
 
-        // Prepare arguments in parameter order
+        // Prepare arguments in parameter order.
         let mut json_args = Vec::new();
         for param in function.params() {
             if param.is_optional {
@@ -265,7 +262,10 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
     ];
 
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
-        if let Some(session_id) = parts.headers.get("MCP-Session-Id").and_then(|v| v.to_str().ok())
+        if let Some(session_id) = parts
+            .headers
+            .get("MCP-Session-Id")
+            .and_then(|v| v.to_str().ok())
         {
             attrs.push(KeyValue::new("mcp.session.id", session_id.to_string()));
         }
@@ -274,10 +274,7 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
             .get("MCP-Protocol-Version")
             .and_then(|v| v.to_str().ok())
         {
-            attrs.push(KeyValue::new(
-                "mcp.protocol.version",
-                version.to_string(),
-            ));
+            attrs.push(KeyValue::new("mcp.protocol.version", version.to_string()));
         }
     }
 
@@ -309,14 +306,10 @@ impl ServerHandler for McpServer {
 
         let span_ctx = self.start_mcp_span("tools/call", Some(tool_name), attrs, meta);
 
-        let context = span_ctx
-            .as_ref()
-            .map(|(_, ctx)| ctx.clone());
+        let context = span_ctx.as_ref().map(|(_, ctx)| ctx.clone());
 
         let (mut span, result) = {
-            let result = self
-                .handle_tool_call(tool_name, &arguments, context)
-                .await;
+            let result = self.handle_tool_call(tool_name, &arguments, context).await;
             (span_ctx.map(|(span, _)| span), result)
         };
 
@@ -341,8 +334,7 @@ impl ServerHandler for McpServer {
         } else {
             Some(&context.meta)
         };
-        let span_ctx =
-            self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
+        let span_ctx = self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
 
         let tools = self.tools.values().map(|(t, _, _)| t.clone()).collect();
         let result = ListToolsResult {
