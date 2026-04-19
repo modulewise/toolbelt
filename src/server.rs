@@ -21,14 +21,14 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::origin::{OriginPolicy, validate_origin};
-use composable_runtime::{ComponentInvoker, Function, PROPAGATED_HEADERS};
-
-type ComponentName = String;
+use crate::service::{ResolvedTool, ResolvedToolTarget};
+use composable_runtime::{ComponentInvoker, Function, MessagePublisher, PROPAGATED_HEADERS};
 
 #[derive(Clone)]
 pub struct McpServer {
-    tools: HashMap<String, (Tool, Function, ComponentName)>,
+    tools: HashMap<String, ResolvedTool>,
     invoker: Arc<dyn ComponentInvoker>,
+    publisher: Option<Arc<dyn MessagePublisher>>,
     addr: SocketAddr,
     origin_policy: OriginPolicy,
     tracer_provider: Option<Arc<SdkTracerProvider>>,
@@ -36,8 +36,9 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(
-        tools: HashMap<String, (Tool, Function, ComponentName)>,
+        tools: HashMap<String, ResolvedTool>,
         invoker: Arc<dyn ComponentInvoker>,
+        publisher: Option<Arc<dyn MessagePublisher>>,
         addr: SocketAddr,
         origin_policy: OriginPolicy,
         tracer_provider: Option<SdkTracerProvider>,
@@ -45,6 +46,7 @@ impl McpServer {
         Self {
             tools,
             invoker,
+            publisher,
             addr,
             origin_policy,
             tracer_provider: tracer_provider.map(Arc::new),
@@ -115,19 +117,6 @@ impl McpServer {
         parsed_result
     }
 
-    // Coerce a JSON number or boolean to a string when the target WIT type is string.
-    fn coerce_to_string(
-        value: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> serde_json::Value {
-        let is_string_type = schema.get("type") == Some(&serde_json::json!("string"));
-        match (is_string_type, value) {
-            (true, serde_json::Value::Number(n)) => serde_json::Value::String(n.to_string()),
-            (true, serde_json::Value::Bool(b)) => serde_json::Value::String(b.to_string()),
-            _ => value.clone(),
-        }
-    }
-
     // Create an MCP server span following the gen_ai semantic conventions.
     // Returns the span and a propagation context map derived from it.
     //
@@ -196,39 +185,65 @@ impl McpServer {
         arguments: &JsonObject,
         context: Option<HashMap<String, String>>,
     ) -> CallToolResult {
-        let Some((tool, function, component_name)) = self.tools.get(tool_name) else {
+        let Some(resolved) = self.tools.get(tool_name) else {
             return CallToolResult::error(vec![Content::text(format!(
                 "Tool not found: {tool_name}"
             ))]);
         };
 
-        // Prepare arguments in parameter order.
-        let mut json_args = Vec::new();
-        for param in function.params() {
-            if param.is_optional {
-                if let Some(value) = arguments.get(&param.name) {
-                    let coerced = Self::coerce_to_string(value, &param.json_schema);
-                    // Treat empty strings as null for optional non-string parameters
-                    let is_string_type =
-                        param.json_schema.get("type") == Some(&serde_json::json!("string"));
-                    let processed_value = if coerced == serde_json::json!("") && !is_string_type {
-                        serde_json::Value::Null
-                    } else {
-                        coerced
-                    };
-                    json_args.push(processed_value);
-                } else {
-                    json_args.push(serde_json::Value::Null);
-                }
-            } else if let Some(value) = arguments.get(&param.name) {
-                json_args.push(Self::coerce_to_string(value, &param.json_schema));
-            } else {
-                return CallToolResult::error(vec![Content::text(format!(
-                    "Missing required parameter: {}",
-                    param.name
-                ))]);
+        let args_value = serde_json::Value::Object(arguments.clone());
+        if let Err(error) = resolved.input_validator.validate(&args_value) {
+            return CallToolResult::error(vec![Content::text(format!(
+                "Invalid arguments for tool '{tool_name}': {error}"
+            ))]);
+        }
+
+        match &resolved.target {
+            ResolvedToolTarget::Component {
+                function,
+                component_name,
+            } => {
+                self.handle_component_call(
+                    &resolved.tool,
+                    function,
+                    component_name,
+                    arguments,
+                    context,
+                )
+                .await
+            }
+            ResolvedToolTarget::Channel { channel } => {
+                self.handle_channel_call(
+                    &resolved.tool,
+                    &resolved.output_validator,
+                    channel,
+                    arguments,
+                    context,
+                )
+                .await
             }
         }
+    }
+
+    async fn handle_component_call(
+        &self,
+        tool: &Tool,
+        function: &Function,
+        component_name: &str,
+        arguments: &JsonObject,
+        context: Option<HashMap<String, String>>,
+    ) -> CallToolResult {
+        // Prepare arguments in parameter order. Validation already enforced schema conformance.
+        let json_args: Vec<serde_json::Value> = function
+            .params()
+            .iter()
+            .map(|param| {
+                arguments
+                    .get(&param.name)
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            })
+            .collect();
 
         match self
             .invoker
@@ -238,7 +253,6 @@ impl McpServer {
             Ok(result) => {
                 if tool.output_schema.is_some() {
                     let structured_content = self.result_to_structured_content(tool, result);
-
                     CallToolResult::structured(structured_content)
                 } else {
                     let result_text = if result.is_string() {
@@ -250,6 +264,72 @@ impl McpServer {
                 }
             }
             Err(error) => CallToolResult::error(vec![Content::text(error.to_string())]),
+        }
+    }
+
+    async fn handle_channel_call(
+        &self,
+        tool: &Tool,
+        output_validator: &Option<jsonschema::Validator>,
+        channel: &str,
+        arguments: &JsonObject,
+        context: Option<HashMap<String, String>>,
+    ) -> CallToolResult {
+        let Some(publisher) = &self.publisher else {
+            return CallToolResult::error(vec![Content::text(
+                "Channel-backed tools require messaging support".to_string(),
+            )]);
+        };
+
+        let body = match serde_json::to_vec(arguments) {
+            Ok(b) => b,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "Failed to serialize arguments: {e}"
+                ))]);
+            }
+        };
+
+        let mut headers = HashMap::new();
+        headers.insert("content-type".to_string(), "application/json".to_string());
+        if let Some(ctx) = context {
+            headers.extend(ctx);
+        }
+
+        let return_address = match publisher.publish_request(channel, body, headers).await {
+            Ok(ra) => ra,
+            Err(e) => {
+                return CallToolResult::error(vec![Content::text(format!(
+                    "Failed to publish to channel '{channel}': {e}"
+                ))]);
+            }
+        };
+
+        match return_address.take().await {
+            Ok(reply) => {
+                let body = String::from_utf8_lossy(reply.body()).to_string();
+                if let Some(validator) = output_validator {
+                    match serde_json::from_str::<serde_json::Value>(&body) {
+                        Ok(json) => {
+                            if let Err(error) = validator.validate(&json) {
+                                return CallToolResult::error(vec![Content::text(format!(
+                                    "Reply from channel '{channel}' does not conform to output-schema: {error}"
+                                ))]);
+                            }
+                            let structured = self.result_to_structured_content(tool, json);
+                            CallToolResult::structured(structured)
+                        }
+                        Err(e) => CallToolResult::error(vec![Content::text(format!(
+                            "Reply from channel '{channel}' is not valid JSON: {e}"
+                        ))]),
+                    }
+                } else {
+                    CallToolResult::success(vec![Content::text(body)])
+                }
+            }
+            Err(e) => CallToolResult::error(vec![Content::text(format!(
+                "Failed to receive reply for request to channel '{channel}': {e}"
+            ))]),
         }
     }
 }
@@ -336,7 +416,7 @@ impl ServerHandler for McpServer {
         };
         let span_ctx = self.start_mcp_span("tools/list", None, request_attributes(&context), meta);
 
-        let tools = self.tools.values().map(|(t, _, _)| t.clone()).collect();
+        let tools = self.tools.values().map(|r| r.tool.clone()).collect();
         let result = ListToolsResult {
             tools,
             next_cursor: None,
@@ -451,15 +531,33 @@ mod tests {
             for function in component.functions.values() {
                 let tool_name = format!("{}.{}", component.metadata.name, function.key());
                 let tool = McpMapper::function_to_tool(function, &tool_name, None);
+                let schema = serde_json::Value::Object((*tool.input_schema).clone());
+                let input_validator = jsonschema::validator_for(&schema).unwrap();
+                let target = ResolvedToolTarget::Component {
+                    function: Box::new(function.clone()),
+                    component_name: component.metadata.name.clone(),
+                };
                 tools.insert(
                     tool_name,
-                    (tool, function.clone(), component.metadata.name.clone()),
+                    ResolvedTool {
+                        tool,
+                        input_validator,
+                        output_validator: None,
+                        target,
+                    },
                 );
             }
         }
 
         let dummy_addr = "127.0.0.1:0".parse().unwrap();
-        McpServer::new(tools, invoker, dummy_addr, OriginPolicy::AllowAll, None)
+        McpServer::new(
+            tools,
+            invoker,
+            None,
+            dummy_addr,
+            OriginPolicy::AllowAll,
+            None,
+        )
     }
 
     #[derive(Debug, Clone, Default)]
@@ -579,8 +677,10 @@ mod tests {
         assert!(result.is_error.unwrap_or(false));
 
         let text = result.content[0].as_text().unwrap().text.as_str();
-        assert!(text.contains("Missing required parameter"));
-        assert!(text.contains("x"));
+        assert!(
+            text.contains("\"x\" is a required property"),
+            "unexpected error: {text}"
+        );
     }
 
     #[tokio::test]

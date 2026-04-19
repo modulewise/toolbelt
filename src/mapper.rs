@@ -67,6 +67,36 @@ impl McpMapper {
         tool
     }
 
+    /// Create an MCP Tool from a channel config with explicit input and optional output schemas.
+    pub fn channel_tool(
+        tool_name: &str,
+        description: Option<&str>,
+        input_schema: serde_json::Value,
+        output_schema: Option<serde_json::Value>,
+    ) -> Tool {
+        let description = description
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| format!("Call {tool_name}"));
+
+        let input_schema = input_schema
+            .as_object()
+            .cloned()
+            .unwrap_or_else(|| json!({"type": "object"}).as_object().unwrap().clone());
+
+        let mut tool = Tool::new_with_raw(
+            tool_name.to_string(),
+            Some(description.into()),
+            input_schema,
+        )
+        .with_title(tool_name.to_string());
+
+        if let Some(schema) = output_schema.and_then(|s| s.as_object().cloned()) {
+            tool = tool.with_raw_output_schema(schema.into());
+        }
+
+        tool
+    }
+
     fn flatten_schema_if_possible(schema: &serde_json::Value) -> serde_json::Value {
         if let Some(one_of) = schema.get("oneOf").and_then(|v| v.as_array())
             && one_of.len() == 2
