@@ -10,12 +10,25 @@ use composable_runtime::{
 // Default component selector for auto-discovery: top-level components only.
 const DEFAULT_COMPONENT_SELECTOR: &str = "!dependents";
 
+/// How a tool is backed: direct component invocation or channel publish.
+#[derive(Debug, Clone)]
+pub enum ToolTarget {
+    Component {
+        component: String,
+        function: String,
+    },
+    Channel {
+        channel: String,
+        input_schema: serde_json::Value,
+        output_schema: Option<serde_json::Value>,
+    },
+}
+
 /// Parsed tool within an MCP server.
 #[derive(Debug, Clone)]
 pub struct ToolConfig {
     pub name: String,
-    pub component: String,
-    pub function: String,
+    pub target: ToolTarget,
     pub description: Option<String>,
 }
 
@@ -249,29 +262,89 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
         };
 
         let component = match tool_props.remove("component") {
-            Some(serde_json::Value::String(s)) => s,
+            Some(serde_json::Value::String(s)) => Some(s),
             Some(got) => {
                 return Err(anyhow::anyhow!(
                     "Server '{server_name}': tool '{tool_name}' 'component' must be a string, got {got}"
                 ));
             }
-            None => {
-                return Err(anyhow::anyhow!(
-                    "Server '{server_name}': tool '{tool_name}' missing required 'component' field"
-                ));
-            }
+            None => None,
         };
 
         let function = match tool_props.remove("function") {
-            Some(serde_json::Value::String(s)) => s,
+            Some(serde_json::Value::String(s)) => Some(s),
             Some(got) => {
                 return Err(anyhow::anyhow!(
                     "Server '{server_name}': tool '{tool_name}' 'function' must be a string, got {got}"
                 ));
             }
-            None => {
+            None => None,
+        };
+
+        let channel = match tool_props.remove("channel") {
+            Some(serde_json::Value::String(s)) => Some(s),
+            Some(got) => {
                 return Err(anyhow::anyhow!(
-                    "Server '{server_name}': tool '{tool_name}' missing required 'function' field"
+                    "Server '{server_name}': tool '{tool_name}' 'channel' must be a string, got {got}"
+                ));
+            }
+            None => None,
+        };
+
+        let input_schema = tool_props.remove("input-schema");
+        let output_schema = tool_props.remove("output-schema");
+
+        let target = match (component, function, channel) {
+            (Some(component), Some(function), None) => {
+                if input_schema.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' has 'input-schema' \
+                         but component-backed tools derive their schema directly from WIT"
+                    ));
+                }
+                if output_schema.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "Server '{server_name}': tool '{tool_name}' has 'output-schema' \
+                         but component-backed tools derive their schema directly from WIT"
+                    ));
+                }
+                ToolTarget::Component {
+                    component,
+                    function,
+                }
+            }
+            (None, None, Some(channel)) => {
+                let input_schema = input_schema.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Server '{server_name}': channel-backed tool '{tool_name}' requires 'input-schema'"
+                    )
+                })?;
+                ToolTarget::Channel {
+                    channel,
+                    input_schema,
+                    output_schema,
+                }
+            }
+            (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' cannot have both \
+                     'component'/'function' and 'channel'"
+                ));
+            }
+            (Some(_), None, None) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' has 'component' but missing 'function'"
+                ));
+            }
+            (None, Some(_), None) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' has 'function' but missing 'component'"
+                ));
+            }
+            (None, None, None) => {
+                return Err(anyhow::anyhow!(
+                    "Server '{server_name}': tool '{tool_name}' must have either \
+                     'component'/'function' or 'channel'"
                 ));
             }
         };
@@ -295,8 +368,7 @@ fn parse_tools(server_name: &str, properties: &mut PropertyMap) -> Result<Vec<To
 
         tools.push(ToolConfig {
             name: tool_name,
-            component,
-            function,
+            target,
             description,
         });
     }
@@ -347,8 +419,10 @@ mod tests {
         assert!(servers[0].allowed_origins.is_none());
         assert_eq!(servers[0].tools.len(), 1);
         assert_eq!(servers[0].tools[0].name, "add-two");
-        assert_eq!(servers[0].tools[0].component, "math");
-        assert_eq!(servers[0].tools[0].function, "add-two");
+        assert!(
+            matches!(&servers[0].tools[0].target, ToolTarget::Component { component, function }
+                if component == "math" && function == "add-two")
+        );
         assert!(servers[0].tools[0].description.is_none());
     }
 
@@ -408,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_tool_component() {
+    fn function_without_component() {
         let (mut handler, _) = make_handler();
         let properties = props(vec![
             ("type", serde_json::json!("mcp")),
@@ -425,16 +499,15 @@ mod tests {
 
         let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("missing required 'component'")
+            err.contains("'function' but missing 'component'"),
+            "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn missing_tool_function() {
+    fn component_without_function() {
         let (mut handler, _) = make_handler();
         let properties = props(vec![
             ("type", serde_json::json!("mcp")),
@@ -451,11 +524,125 @@ mod tests {
 
         let result = handler.handle_category("server", "mcp", properties);
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("missing required 'function'")
+            err.contains("'component' but missing 'function'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn no_component_no_channel() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "description": "unreachable tool"
+                    }
+                }),
+            ),
+        ]);
+
+        let result = handler.handle_category("server", "mcp", properties);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must have either"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn channel_and_component_conflict() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "bad": {
+                        "component": "math",
+                        "function": "add",
+                        "channel": "work-queue"
+                    }
+                }),
+            ),
+        ]);
+
+        let result = handler.handle_category("server", "mcp", properties);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot have both"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn channel_tool_with_schema() {
+        let (mut handler, config) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "process": {
+                        "channel": "work-queue",
+                        "description": "Submit work",
+                        "input-schema": {
+                            "type": "object",
+                            "properties": {
+                                "task": { "type": "string" }
+                            },
+                            "required": ["task"]
+                        }
+                    }
+                }),
+            ),
+        ]);
+
+        handler
+            .handle_category("server", "mcp", properties)
+            .unwrap();
+
+        let servers = config.lock().unwrap();
+        assert_eq!(servers[0].tools.len(), 1);
+        assert_eq!(servers[0].tools[0].name, "process");
+        assert_eq!(
+            servers[0].tools[0].description.as_deref(),
+            Some("Submit work")
+        );
+        assert!(matches!(
+            &servers[0].tools[0].target,
+            ToolTarget::Channel { channel, input_schema, .. }
+                if channel == "work-queue"
+                && input_schema.get("properties").is_some()
+        ));
+    }
+
+    #[test]
+    fn channel_tool_requires_schema() {
+        let (mut handler, _) = make_handler();
+        let properties = props(vec![
+            ("type", serde_json::json!("mcp")),
+            ("port", serde_json::json!(3001)),
+            (
+                "tool",
+                serde_json::json!({
+                    "process": {
+                        "channel": "work-queue",
+                        "description": "Submit work"
+                    }
+                }),
+            ),
+        ]);
+
+        let result = handler.handle_category("server", "mcp", properties);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires 'input-schema'"),
+            "unexpected error: {err}"
         );
     }
 

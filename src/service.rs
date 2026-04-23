@@ -4,12 +4,12 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use composable_runtime::{Component, ComponentInvoker, ConfigHandler, Function, Service};
+use composable_runtime::{ComponentInvoker, ConfigHandler, Function, MessagePublisher, Service};
 use rmcp::model::Tool;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::config::{self, McpServerConfig, McpServerConfigHandler, SharedConfig, ToolConfig};
+use crate::config::{self, McpServerConfig, McpServerConfigHandler, SharedConfig, ToolTarget};
 use crate::mapper::McpMapper;
 use crate::origin::OriginPolicy;
 use crate::server::McpServer;
@@ -17,6 +17,7 @@ use crate::server::McpServer;
 pub struct McpService {
     config: SharedConfig,
     invoker: Mutex<Option<Arc<dyn ComponentInvoker>>>,
+    publisher: Mutex<Option<Arc<dyn MessagePublisher>>>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -28,6 +29,7 @@ impl Default for McpService {
         Self {
             config: config::shared_config(),
             invoker: Mutex::new(None),
+            publisher: Mutex::new(None),
             shutdown_tx,
             shutdown_rx,
             tasks: Mutex::new(Vec::new()),
@@ -35,33 +37,32 @@ impl Default for McpService {
     }
 }
 
-// Resolve a tool config against a component's metadata to produce an MCP Tool entry.
-fn build_tool(
-    config: &ToolConfig,
-    component: &Component,
-) -> Result<(String, (Tool, Function, String))> {
-    let function = component.functions.get(&config.function).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Tool '{}': function '{}' not found in component '{}'",
-            config.name,
-            config.function,
-            config.component,
-        )
-    })?;
+/// Resolved runtime representation of a tool's backend.
+#[derive(Clone)]
+pub enum ResolvedToolTarget {
+    Component {
+        function: Box<Function>,
+        component_name: String,
+    },
+    Channel {
+        channel: String,
+    },
+}
 
-    let tool = McpMapper::function_to_tool(function, &config.name, config.description.as_deref());
-
-    Ok((
-        config.name.clone(),
-        (tool, function.clone(), component.metadata.name.clone()),
-    ))
+/// A fully resolved tool: MCP schema + validators + backend.
+#[derive(Clone)]
+pub struct ResolvedTool {
+    pub tool: Tool,
+    pub input_validator: jsonschema::Validator,
+    pub output_validator: Option<jsonschema::Validator>,
+    pub target: ResolvedToolTarget,
 }
 
 // Resolve all tools for a server from both explicit tool configs and component-selector.
 fn resolve_tools(
     server_config: &McpServerConfig,
     invoker: &dyn ComponentInvoker,
-) -> Result<HashMap<String, (Tool, Function, String)>> {
+) -> Result<HashMap<String, ResolvedTool>> {
     let mut tools = HashMap::new();
 
     // Selector-discovered tools first (explicit tools take precedence on collision)
@@ -71,9 +72,27 @@ fn resolve_tools(
             for function in component.functions.values() {
                 let tool_name = format!("{}.{}", component.metadata.name, function.key());
                 let tool = McpMapper::function_to_tool(function, &tool_name, None);
+                let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
+                let input_validator = build_validator(
+                    &server_config.name,
+                    &tool_name,
+                    "input-schema",
+                    &input_schema,
+                )?;
+                let target = ResolvedToolTarget::Component {
+                    function: Box::new(function.clone()),
+                    component_name: component.metadata.name.clone(),
+                };
                 tools.insert(
                     tool_name,
-                    (tool, function.clone(), component.metadata.name.clone()),
+                    ResolvedTool {
+                        tool,
+                        input_validator,
+                        // Currently a WIT-derived schema. Will add validator
+                        // when config allows optional explicit output-schema.
+                        output_validator: None,
+                        target,
+                    },
                 );
             }
         }
@@ -81,22 +100,115 @@ fn resolve_tools(
 
     // Explicit tool configs override selector-discovered tools on name collision
     for tool_config in &server_config.tools {
-        let component = invoker
-            .get_component(&tool_config.component)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Server '{}': tool '{}' references unknown component '{}'",
-                    server_config.name,
-                    tool_config.name,
-                    tool_config.component,
+        let (name, entry) = match &tool_config.target {
+            ToolTarget::Component {
+                component,
+                function,
+            } => {
+                let comp = invoker.get_component(component).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Server '{}': tool '{}' references unknown component '{}'",
+                        server_config.name,
+                        tool_config.name,
+                        component,
+                    )
+                })?;
+                let func = comp.functions.get(function).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Tool '{}': function '{}' not found in component '{}'",
+                        tool_config.name,
+                        function,
+                        component,
+                    )
+                })?;
+                let tool = McpMapper::function_to_tool(
+                    func,
+                    &tool_config.name,
+                    tool_config.description.as_deref(),
+                );
+                let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
+                let input_validator = build_validator(
+                    &server_config.name,
+                    &tool_config.name,
+                    "input-schema",
+                    &input_schema,
+                )?;
+                let target = ResolvedToolTarget::Component {
+                    function: Box::new(func.clone()),
+                    component_name: comp.metadata.name.clone(),
+                };
+                (
+                    tool_config.name.clone(),
+                    ResolvedTool {
+                        tool,
+                        input_validator,
+                        // Currently a WIT-derived schema. Will add validator
+                        // when config allows optional explicit output-schema.
+                        output_validator: None,
+                        target,
+                    },
                 )
-            })?;
-
-        let (name, entry) = build_tool(tool_config, component)?;
+            }
+            ToolTarget::Channel {
+                channel,
+                input_schema,
+                output_schema,
+            } => {
+                let tool = McpMapper::channel_tool(
+                    &tool_config.name,
+                    tool_config.description.as_deref(),
+                    input_schema.clone(),
+                    output_schema.clone(),
+                );
+                let input_schema_val = serde_json::Value::Object((*tool.input_schema).clone());
+                let input_validator = build_validator(
+                    &server_config.name,
+                    &tool_config.name,
+                    "input-schema",
+                    &input_schema_val,
+                )?;
+                let output_validator = tool
+                    .output_schema
+                    .as_ref()
+                    .map(|s| {
+                        let schema = serde_json::Value::Object((**s).clone());
+                        build_validator(
+                            &server_config.name,
+                            &tool_config.name,
+                            "output-schema",
+                            &schema,
+                        )
+                    })
+                    .transpose()?;
+                let target = ResolvedToolTarget::Channel {
+                    channel: channel.clone(),
+                };
+                (
+                    tool_config.name.clone(),
+                    ResolvedTool {
+                        tool,
+                        input_validator,
+                        output_validator,
+                        target,
+                    },
+                )
+            }
+        };
         tools.insert(name, entry);
     }
 
     Ok(tools)
+}
+
+fn build_validator(
+    server_name: &str,
+    tool_name: &str,
+    schema_name: &str,
+    schema: &serde_json::Value,
+) -> Result<jsonschema::Validator> {
+    jsonschema::validator_for(schema).map_err(|e| {
+        anyhow::anyhow!("Server '{server_name}': tool '{tool_name}' has invalid {schema_name}: {e}")
+    })
 }
 
 impl Service for McpService {
@@ -108,6 +220,10 @@ impl Service for McpService {
 
     fn set_invoker(&self, invoker: Arc<dyn ComponentInvoker>) {
         *self.invoker.lock().unwrap() = Some(invoker);
+    }
+
+    fn set_publisher(&self, publisher: Arc<dyn MessagePublisher>) {
+        *self.publisher.lock().unwrap() = Some(publisher);
     }
 
     fn start(&self) -> Result<()> {
@@ -122,6 +238,8 @@ impl Service for McpService {
             .unwrap()
             .clone()
             .expect("set_invoker must be called before start");
+
+        let publisher = self.publisher.lock().unwrap().clone();
 
         if server_configs.is_empty() {
             tracing::info!(
@@ -168,6 +286,7 @@ impl Service for McpService {
             let server = McpServer::new(
                 tools,
                 Arc::clone(&invoker),
+                publisher.clone(),
                 addr,
                 origin_policy,
                 tracer_provider,

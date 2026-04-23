@@ -25,6 +25,6 @@ cargo run -- config.toml calculator.wasm
 ```sh
 ../curl/initialize.sh
 ../curl/list_tools.sh
-../curl/call_tool.sh calculator.add a=4 b=3
-../curl/call_tool.sh calculator.divide a=99 b=11
+../curl/call_tool.sh add a=4 b=3
+../curl/call_tool.sh divide a=99 b=11
 ```
