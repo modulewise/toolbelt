@@ -191,10 +191,7 @@ impl exports::composable::mcp::client::Guest for Component {
 
         match composable::http::client::delete(&server_url, &headers, None) {
             Ok(response) => {
-                log_debug(&format!(
-                    "Terminate response status: {}",
-                    response.status
-                ));
+                log_debug(&format!("Terminate response status: {}", response.status));
                 Ok(())
             }
             Err(e) => {
@@ -376,11 +373,7 @@ fn initialize_session(
 
 // POST a JSON-RPC payload to the MCP server with the required content-type
 // and accept headers, optionally including the MCP-Session-Id header.
-fn post_jsonrpc(
-    url: &str,
-    body: &[u8],
-    session_id: Option<&str>,
-) -> Result<HttpResponse, String> {
+fn post_jsonrpc(url: &str, body: &[u8], session_id: Option<&str>) -> Result<HttpResponse, String> {
     use composable::http::client;
 
     log_debug(&format!("post_jsonrpc to URL: {}", url));
