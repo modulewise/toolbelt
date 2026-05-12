@@ -1,0 +1,9 @@
+/// patched to use 0.2.6 instead of 0.2.0 for wasi:clocks and wasi:io
+package wasi:otel@0.2.0-rc.2+patch;
+
+world imports {
+    import types;
+    import tracing;
+    import metrics;
+    import logs;
+}

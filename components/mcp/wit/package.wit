@@ -1,0 +1,201 @@
+package composable:mcp@0.1.0;
+
+interface types {
+    /// JSON Schema as string.
+    type json-schema = string;
+
+    /// JSON value as string.
+    type json-value = string;
+
+    /// Audience role for content annotations.
+    enum role {
+        user,
+        assistant,
+    }
+
+    /// Optional annotations for content blocks and resources.
+    record annotations {
+        /// Intended audience(s) for the data.
+        audience: option<list<role>>,
+        /// Importance from 0.0 (least) to 1.0 (most).
+        priority: option<f64>,
+        /// ISO 8601 last-modified timestamp.
+        last-modified: option<string>,
+    }
+
+    /// Hints describing expected tool behavior.
+    record tool-annotations {
+        /// Human-readable display name (precedence: tool.title > annotations.title > tool.name).
+        title: option<string>,
+        /// If true, the server claims the tool does not modify its environment.
+        read-only-hint: option<bool>,
+        /// If true, the server claims the tool may perform destructive updates.
+        destructive-hint: option<bool>,
+        /// If true, the server claims repeated calls with the same arguments have no additional effect.
+        idempotent-hint: option<bool>,
+        /// If true, the server claims the tool may interact with external entities.
+        open-world-hint: option<bool>,
+    }
+
+    record tool {
+        name: string,
+        description: option<string>,
+        title: option<string>,
+        /// JSON Schema defining input parameters.
+        input-schema: json-schema,
+        /// Optional JSON Schema for output validation.
+        output-schema: option<json-schema>,
+        annotations: option<tool-annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    record text-content {
+        text: string,
+        annotations: option<annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    record image-content {
+        /// base64 encoded
+        data: string,
+        mime-type: string,
+        annotations: option<annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    record audio-content {
+        /// base64 encoded
+        data: string,
+        mime-type: string,
+        annotations: option<annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    record resource-link {
+        uri: string,
+        name: option<string>,
+        description: option<string>,
+        mime-type: option<string>,
+        annotations: option<annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    record text-resource-contents {
+        uri: string,
+        mime-type: option<string>,
+        text: string,
+        meta: option<list<meta-entry>>,
+    }
+
+    record blob-resource-contents {
+        uri: string,
+        mime-type: option<string>,
+        blob: string,
+        meta: option<list<meta-entry>>,
+    }
+
+    variant resource-contents {
+        text(text-resource-contents),
+        blob(blob-resource-contents),
+    }
+
+    record embedded-resource {
+        resource-data: resource-contents,
+        annotations: option<annotations>,
+        meta: option<list<meta-entry>>,
+    }
+
+    variant content-block {
+        text(text-content),
+        image(image-content),
+        audio(audio-content),
+        resource-link(resource-link),
+        %resource(embedded-resource),
+    }
+
+    record call-tool-result {
+        content: list<content-block>,
+        is-error: bool,
+        /// Optional structured content conforming to tool's output-schema.
+        structured-content: option<string>,
+        meta: option<list<meta-entry>>,
+    }
+
+    /// Metadata key-value pair (_meta in MCP spec).
+    /// Keys may include: traceparent, tracestate, etc.
+    type meta-entry = tuple<string, string>;
+
+    /// MCP Implementation info (clientInfo / serverInfo).
+    record implementation {
+        name: string,
+        version: string,
+        title: option<string>,
+    }
+
+    /// Request params for initialization.
+    record initialize-request {
+        protocol-version: option<string>,
+        /// JSON-encoded ClientCapabilities
+        capabilities: option<json-value>,
+        client-info: option<implementation>,
+        meta: option<list<meta-entry>>,
+    }
+
+    /// Result of initialization. Carries the active session-id plus the
+    /// server's negotiated protocol version, capabilities, identifying info,
+    /// and optional usage instructions.
+    record initialize-result {
+        session-id: string,
+        protocol-version: string,
+        /// JSON-encoded ServerCapabilities
+        capabilities: json-value,
+        server-info: implementation,
+        instructions: option<string>,
+        meta: option<list<meta-entry>>,
+    }
+
+    /// Request params for tools/call.
+    record call-tool-request {
+        name: string,
+        arguments: option<json-value>,
+        meta: option<list<meta-entry>>,
+    }
+
+    /// Request params for tools/list.
+    record list-tools-request {
+        cursor: option<string>,
+        meta: option<list<meta-entry>>,
+    }
+
+    /// Result from tools/list. Includes a continuation cursor when the
+    /// server has more tools beyond this page (absent on the final page).
+    record list-tools-result {
+        tools: list<tool>,
+        next-cursor: option<string>,
+        meta: option<list<meta-entry>>,
+    }
+}
+
+interface client {
+    use types.{tool, initialize-request, initialize-result, list-tools-request, list-tools-result, call-tool-request, call-tool-result};
+
+    /// Initialize a connection to an MCP server.
+    initialize: func(server-url: string, request: option<initialize-request>) -> result<initialize-result, string>;
+
+    /// List available tools from the MCP server.
+    list-tools: func(server-url: string, session-id: string, request-id: s32, request: option<list-tools-request>) -> result<list-tools-result, string>;
+
+    /// Call a tool.
+    call-tool: func(server-url: string, session-id: string, request-id: s32, request: call-tool-request) -> result<call-tool-result, string>;
+
+    /// Terminate a session. Best-effort: any HTTP response from the server is
+    /// treated as success (including 405, which indicates the server does not
+    /// support session termination). Only transport-level failures return Err.
+    terminate: func(server-url: string, session-id: string) -> result<_, string>;
+}
+
+world mcp-client {
+    export client;
+    import composable:http/client@0.1.0;
+    import wasi:logging/logging@0.1.0-draft;
+}

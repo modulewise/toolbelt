@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "mcp/client",
+]
+resolver = "3"
+
+[workspace.dependencies]
+url = "2.5"
+wit-bindgen = "0.57"
