@@ -1,0 +1,2 @@
+[overrides]
+"wasi:otel" = { path = "./wit/overrides/wasi-otel" }
