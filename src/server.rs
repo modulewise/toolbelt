@@ -8,8 +8,9 @@ use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use rmcp::{
     ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult, Meta,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResult, Content, InitializeRequestParams, InitializeResult,
+        JsonObject, ListToolsResult, Meta, PaginatedRequestParams, ServerCapabilities, ServerInfo,
+        Tool,
     },
     service::{RequestContext, RoleServer},
     transport::StreamableHttpService,
@@ -74,7 +75,7 @@ impl McpServer {
         tracing::info!("Streamable HTTP endpoint: http://{addr}/mcp");
 
         tokio::select! {
-            result = axum::serve(tcp_listener, router) => {
+            result = axum::serve(tcp_listener, router.into_make_service_with_connect_info::<SocketAddr>()) => {
                 if let Err(err) = result {
                     tracing::error!("Server error: {err}");
                 }
@@ -129,7 +130,7 @@ impl McpServer {
         meta: Option<&Meta>,
     ) -> Option<(opentelemetry_sdk::trace::Span, HashMap<String, String>)> {
         let tp = self.tracer_provider.as_ref()?;
-        let tracer = tp.tracer("modulewise-toolbelt");
+        let tracer = tp.tracer("modulewise.composable.mcp.server");
 
         let span_name = match target {
             Some(t) => format!("{method} {t}"),
@@ -339,6 +340,7 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
     let mut attrs = vec![
         KeyValue::new("jsonrpc.request.id", context.id.to_string()),
         KeyValue::new("network.transport", "tcp"),
+        KeyValue::new("network.protocol.name", "http"),
     ];
 
     if let Some(parts) = context.extensions.get::<axum::http::request::Parts>() {
@@ -355,6 +357,16 @@ fn request_attributes(context: &RequestContext<RoleServer>) -> Vec<KeyValue> {
             .and_then(|v| v.to_str().ok())
         {
             attrs.push(KeyValue::new("mcp.protocol.version", version.to_string()));
+        }
+        if let Some(connect_info) = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        {
+            attrs.push(KeyValue::new(
+                "client.address",
+                connect_info.0.ip().to_string(),
+            ));
+            attrs.push(KeyValue::new("client.port", connect_info.0.port() as i64));
         }
     }
 
@@ -398,6 +410,30 @@ impl ServerHandler for McpServer {
                 span.set_status(Status::error(""));
                 span.set_attribute(KeyValue::new("error.type", "tool_error"));
             }
+            span.end();
+        }
+
+        Ok(result)
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, rmcp::ErrorData> {
+        let meta = if context.meta.0.is_empty() {
+            None
+        } else {
+            Some(&context.meta)
+        };
+        let span_ctx = self.start_mcp_span("initialize", None, request_attributes(&context), meta);
+
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        let result = self.get_info();
+
+        if let Some((mut span, _)) = span_ctx {
             span.end();
         }
 
