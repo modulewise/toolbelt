@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "mcp/client",
+    "mcp/client-otel-interceptor",
 ]
 resolver = "3"
 
