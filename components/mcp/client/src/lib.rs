@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use serde_json::json;
 
 wit_bindgen::generate!({
@@ -10,43 +12,72 @@ use composable::http::client::HttpResponse;
 use composable::mcp::types::*;
 use wasi::logging::logging::{Level, log};
 
-struct Component;
+struct Client;
 
-impl exports::composable::mcp::client::Guest for Component {
+impl exports::composable::mcp::client::Guest for Client {
+    type Session = Session;
+}
+
+pub struct Session {
+    server_url: String,
+    init_response: InitializeResponse,
+    // The session-id and protocol-version are extracted at construction time
+    // to avoid unwrapping the response's result variant on every call.
+    session_id: String,
+    protocol_version: String,
+    // Monotonic request-id counter for post-initialize JSON-RPC requests.
+    request_id: RefCell<i32>,
+}
+
+impl exports::composable::mcp::client::GuestSession for Session {
     fn initialize(
         server_url: String,
         request: Option<InitializeRequest>,
-    ) -> Result<InitializeResult, String> {
+    ) -> Result<exports::composable::mcp::client::Session, String> {
         validate_server_url(&server_url)?;
         log_info(&format!(
             "Initializing MCP session with server: {}",
             server_url
         ));
-        match initialize_session(&server_url, request) {
-            Ok(result) => {
-                log_info(&format!(
-                    "MCP session initialized, session_id: {}",
-                    result.session_id
-                ));
-                Ok(result)
+        let init_response = initialize_session(&server_url, request).inspect_err(|e| {
+            log_error(&format!("Failed to initialize MCP session: {}", e));
+        })?;
+        // Any error on initialize returns an Err result, not an error payload.
+        let init_result = match &init_response.payload {
+            InitializePayload::Result(r) => r,
+            InitializePayload::Error(e) => {
+                let message = format!(
+                    "Initialize returned protocol error {}: {}",
+                    e.code, e.message
+                );
+                log_error(&message);
+                return Err(message);
             }
-            Err(e) => {
-                log_error(&format!("Failed to initialize MCP session: {}", e));
-                Err(e)
-            }
-        }
+        };
+        let session_id = init_result.session_id.clone();
+        let protocol_version = init_result.protocol_version.clone();
+        log_info(&format!(
+            "MCP session initialized, session_id: {}",
+            session_id
+        ));
+        Ok(exports::composable::mcp::client::Session::new(Session {
+            server_url,
+            init_response,
+            session_id,
+            protocol_version,
+            request_id: RefCell::new(1),
+        }))
     }
 
-    fn list_tools(
-        server_url: String,
-        session_id: String,
-        request_id: i32,
-        request: Option<ListToolsRequest>,
-    ) -> Result<ListToolsResult, String> {
-        validate_server_url(&server_url)?;
+    fn initialize_response(&self) -> InitializeResponse {
+        self.init_response.clone()
+    }
+
+    fn list_tools(&self, request: Option<ListToolsRequest>) -> Result<ListToolsResponse, String> {
+        let request_id = self.next_request_id();
         log_info(&format!(
             "Listing tools from server: {}, session_id: {}, request_id: {}",
-            server_url, session_id, request_id
+            self.server_url, self.session_id, request_id
         ));
 
         let mut params = json!({});
@@ -74,7 +105,12 @@ impl exports::composable::mcp::client::Guest for Component {
             headers,
             body,
             ..
-        } = post_jsonrpc(&server_url, request_body.as_bytes(), Some(&session_id))?;
+        } = post(
+            &self.server_url,
+            request_body.as_bytes(),
+            Some(&self.session_id),
+            Some(&self.protocol_version),
+        )?;
 
         let response_body = String::from_utf8_lossy(&body);
         log_debug(&format!(
@@ -85,14 +121,18 @@ impl exports::composable::mcp::client::Guest for Component {
         check_http_status(status, &response_body)?;
 
         let content_type = get_content_type(&headers);
-        let response = parse_response(&response_body, &content_type)?;
+        let envelope = parse_response(&response_body, &content_type)?;
+        let id = envelope_id(&envelope, request_id)?;
 
-        if let Some(error) = response.get("error") {
-            log_error(&format!("tools/list returned error: {}", error));
-            return Err(error.to_string());
+        if let Some(error_json) = envelope.get("error") {
+            log_error(&format!("tools/list returned error: {}", error_json));
+            return Ok(ListToolsResponse {
+                id,
+                payload: ListToolsPayload::Error(parse_response_error(error_json)),
+            });
         }
 
-        let result = &response["result"];
+        let result = &envelope["result"];
         let tools_array = result["tools"].as_array().ok_or_else(|| {
             log_error("No tools array in response");
             "No tools array in response"
@@ -112,23 +152,21 @@ impl exports::composable::mcp::client::Guest for Component {
 
         let meta = parse_meta(result.get("_meta"));
 
-        Ok(ListToolsResult {
-            tools,
-            next_cursor,
-            meta,
+        Ok(ListToolsResponse {
+            id,
+            payload: ListToolsPayload::Result(ListToolsResult {
+                tools,
+                next_cursor,
+                meta,
+            }),
         })
     }
 
-    fn call_tool(
-        server_url: String,
-        session_id: String,
-        request_id: i32,
-        request: CallToolRequest,
-    ) -> Result<CallToolResult, String> {
-        validate_server_url(&server_url)?;
+    fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
+        let request_id = self.next_request_id();
         log_info(&format!(
             "Calling tool '{}' on server: {}, session_id: {}, request_id: {}",
-            request.name, server_url, session_id, request_id
+            request.name, self.server_url, self.session_id, request_id
         ));
         log_debug(&format!("Tool arguments: {:?}", request.arguments));
 
@@ -157,7 +195,12 @@ impl exports::composable::mcp::client::Guest for Component {
             headers,
             body,
             ..
-        } = post_jsonrpc(&server_url, request_body.as_bytes(), Some(&session_id))?;
+        } = post(
+            &self.server_url,
+            request_body.as_bytes(),
+            Some(&self.session_id),
+            Some(&self.protocol_version),
+        )?;
 
         let response_body = String::from_utf8_lossy(&body);
         log_debug(&format!("tools/call response body: {}", response_body));
@@ -165,38 +208,91 @@ impl exports::composable::mcp::client::Guest for Component {
         check_http_status(status, &response_body)?;
 
         let content_type = get_content_type(&headers);
-        let response = parse_response(&response_body, &content_type)?;
+        let envelope = parse_response(&response_body, &content_type)?;
+        let id = envelope_id(&envelope, request_id)?;
 
-        if let Some(error) = response.get("error") {
-            log_error(&format!("tools/call returned error: {}", error));
-            return Err(error.to_string());
+        if let Some(error_json) = envelope.get("error") {
+            log_error(&format!("tools/call returned error: {}", error_json));
+            return Ok(CallToolResponse {
+                id,
+                payload: CallToolPayload::Error(parse_response_error(error_json)),
+            });
         }
 
         log_info(&format!(
             "Tool '{}' call completed successfully",
             request.name
         ));
-        let result = &response["result"];
-        parse_call_tool_result(result)
+        let result = &envelope["result"];
+        let call_result = parse_call_tool_result(result)?;
+        Ok(CallToolResponse {
+            id,
+            payload: CallToolPayload::Result(call_result),
+        })
+    }
+}
+
+impl Session {
+    fn next_request_id(&self) -> i32 {
+        let mut id = self.request_id.borrow_mut();
+        *id += 1;
+        *id
+    }
+}
+
+// POST to the MCP server with the standard Content-Type and Accept headers.
+// Include the MCP-Session-Id and MCP-Protocol-Version headers when available.
+fn post(
+    url: &str,
+    body: &[u8],
+    session_id: Option<&str>,
+    protocol_version: Option<&str>,
+) -> Result<HttpResponse, String> {
+    use composable::http::client;
+
+    log_debug(&format!("HTTP POST to URL: {}", url));
+
+    let mut headers = vec![
+        ("Content-Type".to_string(), "application/json".to_string()),
+        (
+            "Accept".to_string(),
+            "application/json, text/event-stream".to_string(),
+        ),
+    ];
+    if let Some(sid) = session_id {
+        headers.push(("MCP-Session-Id".to_string(), sid.to_string()));
+    }
+    if let Some(pv) = protocol_version {
+        headers.push(("MCP-Protocol-Version".to_string(), pv.to_string()));
     }
 
-    fn terminate(server_url: String, session_id: String) -> Result<(), String> {
-        validate_server_url(&server_url)?;
+    log_debug(&format!("HTTP POST headers: {:?}", headers));
+
+    let response = client::post(url, &headers, body, None).map_err(|e| {
+        log_error(&format!("HTTP request failed: {}", e));
+        e
+    })?;
+
+    log_debug(&format!("HTTP response status: {}", response.status));
+
+    Ok(response)
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
         log_info(&format!(
             "Terminating MCP session {} on server: {}",
-            session_id, server_url
+            self.session_id, self.server_url
         ));
 
-        let headers = vec![("MCP-Session-Id".to_string(), session_id)];
+        let headers = vec![("MCP-Session-Id".to_string(), self.session_id.clone())];
 
-        match composable::http::client::delete(&server_url, &headers, None) {
+        match composable::http::client::delete(&self.server_url, &headers, None) {
             Ok(response) => {
                 log_debug(&format!("Terminate response status: {}", response.status));
-                Ok(())
             }
             Err(e) => {
                 log_error(&format!("Terminate request failed: {}", e));
-                Err(e)
             }
         }
     }
@@ -220,11 +316,11 @@ impl Default for InitializeRequest {
     }
 }
 
-// Initialize session with the MCP Server.
+// Initialize session with the MCP server.
 fn initialize_session(
     server_url: &str,
     request: Option<InitializeRequest>,
-) -> Result<InitializeResult, String> {
+) -> Result<InitializeResponse, String> {
     log_debug(&format!(
         "Starting session initialization with server: {}",
         server_url
@@ -279,7 +375,7 @@ fn initialize_session(
         headers,
         body,
         ..
-    } = post_jsonrpc(server_url, request_body.as_bytes(), None)?;
+    } = post(server_url, request_body.as_bytes(), None, None)?;
 
     let response_body = String::from_utf8_lossy(&body);
     log_debug(&format!(
@@ -293,8 +389,21 @@ fn initialize_session(
         return Err(message);
     }
 
-    // Extract session ID from headers.
     log_debug(&format!("Response headers: {:?}", headers));
+    let content_type = get_content_type(&headers);
+    let envelope = parse_response(&response_body, &content_type)?;
+    let id = envelope_id(&envelope, 1)?;
+
+    // Protocol error returns Error payload.
+    // No session-id, no initialized notification.
+    if let Some(error_json) = envelope.get("error") {
+        log_error(&format!("initialize returned error: {}", error_json));
+        return Ok(InitializeResponse {
+            id,
+            payload: InitializePayload::Error(parse_response_error(error_json)),
+        });
+    }
+
     let session_id = headers
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
@@ -306,14 +415,7 @@ fn initialize_session(
 
     log_debug(&format!("Got session ID: {}", session_id));
 
-    // Parse the JSON-RPC result for negotiated server values.
-    let content_type = get_content_type(&headers);
-    let response = parse_response(&response_body, &content_type)?;
-    if let Some(error) = response.get("error") {
-        log_error(&format!("initialize returned error: {}", error));
-        return Err(error.to_string());
-    }
-    let result = &response["result"];
+    let result = &envelope["result"];
 
     let server_protocol_version = result["protocolVersion"]
         .as_str()
@@ -358,48 +460,25 @@ fn initialize_session(
     .to_string();
 
     log_debug("Sending initialized notification");
-    post_jsonrpc(server_url, notification_body.as_bytes(), Some(&session_id))?;
+    post(
+        server_url,
+        notification_body.as_bytes(),
+        Some(&session_id),
+        Some(&server_protocol_version),
+    )?;
 
     log_debug("Session initialization complete");
-    Ok(InitializeResult {
-        session_id,
-        protocol_version: server_protocol_version,
-        capabilities: server_capabilities,
-        server_info,
-        instructions,
-        meta,
+    Ok(InitializeResponse {
+        id,
+        payload: InitializePayload::Result(InitializeResult {
+            session_id,
+            protocol_version: server_protocol_version,
+            capabilities: server_capabilities,
+            server_info,
+            instructions,
+            meta,
+        }),
     })
-}
-
-// POST a JSON-RPC payload to the MCP server with the required content-type
-// and accept headers, optionally including the MCP-Session-Id header.
-fn post_jsonrpc(url: &str, body: &[u8], session_id: Option<&str>) -> Result<HttpResponse, String> {
-    use composable::http::client;
-
-    log_debug(&format!("post_jsonrpc to URL: {}", url));
-
-    let mut headers = vec![
-        ("Content-Type".to_string(), "application/json".to_string()),
-        (
-            "Accept".to_string(),
-            "application/json, text/event-stream".to_string(),
-        ),
-    ];
-
-    if let Some(sid) = session_id {
-        headers.push(("MCP-Session-Id".to_string(), sid.to_string()));
-    }
-
-    log_debug(&format!("HTTP POST headers: {:?}", headers));
-
-    let response = client::post(url, &headers, body, None).map_err(|e| {
-        log_error(&format!("HTTP request failed: {}", e));
-        e
-    })?;
-
-    log_debug(&format!("HTTP response status: {}", response.status));
-
-    Ok(response)
 }
 
 // Check HTTP status code and return a descriptive error for non-success cases.
@@ -459,6 +538,41 @@ fn parse_response(body: &str, content_type: &str) -> Result<serde_json::Value, S
             log_error("JSON body was not a JSON-RPC response");
             Err("JSON body was not a JSON-RPC response".to_string())
         }
+    }
+}
+
+// Extract the JSON-RPC envelope's `id` and verify it matches the id we sent.
+fn envelope_id(envelope: &serde_json::Value, expected: i32) -> Result<i32, String> {
+    let raw = envelope.get("id").ok_or("Missing JSON-RPC response id")?;
+    let id = raw
+        .as_i64()
+        .and_then(|n| i32::try_from(n).ok())
+        .ok_or_else(|| format!("JSON-RPC response id is not a valid integer: {raw}"))?;
+    if id != expected {
+        return Err(format!(
+            "JSON-RPC response id {id} does not match request id {expected}"
+        ));
+    }
+    Ok(id)
+}
+
+// Parse a JSON-RPC error object into the WIT ResponseError record.
+fn parse_response_error(error_json: &serde_json::Value) -> ResponseError {
+    let code = error_json
+        .get("code")
+        .and_then(|v| v.as_i64())
+        .and_then(|n| i32::try_from(n).ok())
+        .unwrap_or(0);
+    let message = error_json
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let data = error_json.get("data").map(|v| v.to_string());
+    ResponseError {
+        code,
+        message,
+        data,
     }
 }
 
@@ -712,4 +826,4 @@ fn log_error(message: &str) {
     log(Level::Error, "mcp-client", message);
 }
 
-export!(Component);
+export!(Client);
