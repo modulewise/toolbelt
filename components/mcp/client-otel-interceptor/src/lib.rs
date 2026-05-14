@@ -187,7 +187,7 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
 }
 
 const SCOPE_NAME: &str = "modulewise.composable.mcp.client";
-const SCOPE_VERSION: &str = "0.1.0";
+const SCOPE_VERSION: &str = "0.2.0";
 
 fn kv(key: &str, value: &str) -> tracing::KeyValue {
     tracing::KeyValue {

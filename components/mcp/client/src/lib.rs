@@ -22,10 +22,10 @@ pub struct Session {
     server_url: String,
     init_response: InitializeResponse,
     // The session-id and protocol-version are extracted at construction time
-    // to avoid unwrapping the response's result variant on every call.
+    // to avoid cloning from the response's result variant on every call.
     session_id: String,
     protocol_version: String,
-    // Monotonic request-id counter for post-initialize JSON-RPC requests.
+    // Monotonic id counter for JSON-RPC requests.
     request_id: RefCell<i32>,
 }
 
@@ -339,7 +339,7 @@ fn initialize_session(
 
     let client_info = request.client_info.unwrap_or(Implementation {
         name: "composable-mcp-client".to_string(),
-        version: "0.1.0".to_string(),
+        version: "0.2.0".to_string(),
         title: None,
     });
 
