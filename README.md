@@ -8,9 +8,9 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Server that e
 
 Prerequisite: a current [rust toolchain](https://www.rust-lang.org/tools/install)
 
-Clone the [toolbelt](https://github.com/modulewise/toolbelt) project if you have not already.
+Clone the [composable-mcp](https://github.com/modulewise/composable-mcp) project if you have not already.
 
-Then from within the `toolbelt` directory:
+Then from within the `composable-mcp` directory:
 
 ```
 cargo install --path .
@@ -211,6 +211,6 @@ See [examples/otel](examples/otel) for a complete example with Jaeger.
 
 ## License
 
-Copyright (c) 2026 Modulewise Inc and the Modulewise Toolbelt contributors.
+Copyright (c) 2026 Modulewise Inc and the Modulewise Composable MCP contributors.
 
 Apache License v2.0: see [LICENSE](./LICENSE) for details.

@@ -471,7 +471,7 @@ impl ServerHandler for McpServer {
             .with_server_info(
                 rmcp::model::Implementation::new("modulewise-toolbelt", env!("CARGO_PKG_VERSION"))
                     .with_title("Modulewise Toolbelt")
-                    .with_website_url("https://github.com/modulewise/toolbelt"),
+                    .with_website_url("https://github.com/modulewise/composable-mcp"),
             )
             .with_instructions(format!(
                 "This server provides {} tools. \

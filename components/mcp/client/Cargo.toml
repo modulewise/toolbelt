@@ -3,9 +3,9 @@ name = "mcp-client"
 version = "0.2.0"
 edition = "2024"
 description = "MCP client component implementing the composable:mcp/client interface"
-homepage = "https://github.com/modulewise/toolbelt/tree/main/components/mcp"
+homepage = "https://github.com/modulewise/composable-mcp/tree/main/components/mcp"
 license = "Apache-2.0"
-repository = "https://github.com/modulewise/toolbelt"
+repository = "https://github.com/modulewise/composable-mcp"
 
 [lib]
 crate-type = ["cdylib"]
