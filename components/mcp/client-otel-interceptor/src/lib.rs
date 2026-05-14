@@ -153,14 +153,11 @@ impl exports::composable::mcp::client::GuestSession for InterceptedSession {
             &self.server_url,
             initial_attributes,
             |traceparent, tracestate| {
-                let mut meta = request.meta.unwrap_or_default();
+                let mut req = request;
+                let mut meta = req.meta.unwrap_or_default();
                 inject_trace_context(&mut meta, traceparent, tracestate);
-                let enriched = CallToolRequest {
-                    name: request.name,
-                    arguments: request.arguments,
-                    meta: Some(meta),
-                };
-                self.target.call_tool(&enriched)
+                req.meta = Some(meta);
+                self.target.call_tool(&req)
             },
             |result, attrs| match result {
                 Ok(response) => {
