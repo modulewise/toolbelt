@@ -1,4 +1,4 @@
-package composable:mcp@0.1.0;
+package composable:mcp@0.2.0;
 
 interface types {
     /// JSON Schema as string.
@@ -174,24 +174,86 @@ interface types {
         next-cursor: option<string>,
         meta: option<list<meta-entry>>,
     }
+
+    /// JSON-RPC error object returned by the server. Distinct from a tool
+    /// execution error (which is reported inside a successful call-tool-result
+    /// with `is-error: true`) and from a transport failure (which is returned
+    /// via the WIT `result<..., string>` outer error).
+    record response-error {
+        code: s32,
+        message: string,
+        /// Optional JSON-encoded server-supplied error detail.
+        data: option<json-value>,
+    }
+
+    /// Payload of an initialize JSON-RPC response: result or error.
+    variant initialize-payload {
+        %result(initialize-result),
+        error(response-error),
+    }
+
+    /// Payload of a tools/list JSON-RPC response: result or error.
+    variant list-tools-payload {
+        %result(list-tools-result),
+        error(response-error),
+    }
+
+    /// Payload of a tools/call JSON-RPC response: result or error.
+    variant call-tool-payload {
+        %result(call-tool-result),
+        error(response-error),
+    }
+
+    /// JSON-RPC envelope for initialize.
+    record initialize-response {
+        id: s32,
+        payload: initialize-payload,
+    }
+
+    /// JSON-RPC envelope for tools/list.
+    record list-tools-response {
+        id: s32,
+        payload: list-tools-payload,
+    }
+
+    /// JSON-RPC envelope for tools/call.
+    record call-tool-response {
+        id: s32,
+        payload: call-tool-payload,
+    }
 }
 
 interface client {
-    use types.{tool, initialize-request, initialize-result, list-tools-request, list-tools-result, call-tool-request, call-tool-result};
+    use types.{initialize-request, initialize-response, list-tools-request, list-tools-response, call-tool-request, call-tool-response};
 
-    /// Initialize a connection to an MCP server.
-    initialize: func(server-url: string, request: option<initialize-request>) -> result<initialize-result, string>;
+    /// An active MCP session. Encapsulates the connection state (server URL,
+    /// session id, negotiated protocol version, monotonic request-id counter).
+    /// Dropping the handle should trigger a best-effort HTTP DELETE to
+    /// terminate the session on the server.
+    ///
+    /// There are three error layers:
+    /// - Transport failure: returned via the `result<..., string>` error arm.
+    /// - JSON-RPC protocol error: returned in the response payload as an
+    ///   `error` variant (but see comment on the `initialize` constructor).
+    /// - Tool execution error (only for tools/call): protocol succeeded, but
+    ///   the tool itself reported `is-error: true` inside its result.
+    resource session {
+        /// Initialize a connection to an MCP server. Returns a session handle
+        /// on success. A JSON-RPC protocol error during initialize is treated
+        /// as failure (no session is created) and returned via the outer Err.
+        initialize: static func(server-url: string, request: option<initialize-request>) -> result<session, string>;
 
-    /// List available tools from the MCP server.
-    list-tools: func(server-url: string, session-id: string, request-id: s32, request: option<list-tools-request>) -> result<list-tools-result, string>;
+        /// Return the JSON-RPC response from the initialize call. The payload
+        /// should always be the `result` variant in practice, since a proper
+        /// constructor would have returned Err on a JSON-RPC error response.
+        initialize-response: func() -> initialize-response;
 
-    /// Call a tool.
-    call-tool: func(server-url: string, session-id: string, request-id: s32, request: call-tool-request) -> result<call-tool-result, string>;
+        /// List available tools from the MCP server.
+        list-tools: func(request: option<list-tools-request>) -> result<list-tools-response, string>;
 
-    /// Terminate a session. Best-effort: any HTTP response from the server is
-    /// treated as success (including 405, which indicates the server does not
-    /// support session termination). Only transport-level failures return Err.
-    terminate: func(server-url: string, session-id: string) -> result<_, string>;
+        /// Call a tool.
+        call-tool: func(request: call-tool-request) -> result<call-tool-response, string>;
+    }
 }
 
 world mcp-client {

@@ -4,18 +4,190 @@ wit_bindgen::generate!({
     generate_all
 });
 
-use composable::mcp::client as target;
+use composable::mcp::client::Session as TargetSession;
 use composable::mcp::types::{
-    CallToolRequest, CallToolResult, InitializeRequest, InitializeResult, ListToolsRequest,
-    ListToolsResult,
+    CallToolPayload, CallToolRequest, CallToolResponse, InitializePayload, InitializeRequest,
+    InitializeResponse, ListToolsPayload, ListToolsRequest, ListToolsResponse,
 };
 use wasi::clocks::wall_clock;
 use wasi::otel::{tracing, types};
 
-struct McpOtelInterceptor;
+struct Interceptor;
+
+impl exports::composable::mcp::client::Guest for Interceptor {
+    type Session = InterceptedSession;
+}
+
+pub struct InterceptedSession {
+    target: TargetSession,
+    server_url: String,
+    // The session_id and protocol_version are cloned once from the target's
+    // initialize response since they are used as attributes on every span.
+    session_id: Option<String>,
+    protocol_version: Option<String>,
+}
+
+impl exports::composable::mcp::client::GuestSession for InterceptedSession {
+    fn initialize(
+        server_url: String,
+        request: Option<InitializeRequest>,
+    ) -> Result<exports::composable::mcp::client::Session, String> {
+        let target = traced_call(
+            "initialize",
+            "initialize".to_string(),
+            &server_url,
+            vec![],
+            |traceparent, tracestate| {
+                let mut req = request.unwrap_or(InitializeRequest {
+                    protocol_version: None,
+                    capabilities: None,
+                    client_info: None,
+                    meta: None,
+                });
+                let mut meta = req.meta.unwrap_or_default();
+                inject_trace_context(&mut meta, traceparent, tracestate);
+                req.meta = Some(meta);
+                TargetSession::initialize(&server_url, Some(&req))
+            },
+            |result, attrs| match result {
+                Ok(target_session) => {
+                    let response = target_session.initialize_response();
+                    attrs.push(kv("jsonrpc.request.id", &response.id.to_string()));
+                    if let InitializePayload::Result(r) = &response.payload {
+                        attrs.push(kv("mcp.session.id", &r.session_id));
+                        attrs.push(kv("mcp.protocol.version", &r.protocol_version));
+                    }
+                    tracing::Status::Ok
+                }
+                Err(err) => {
+                    attrs.push(kv("error.type", "transport_error"));
+                    tracing::Status::Error(err.clone())
+                }
+            },
+        )?;
+
+        let response = target.initialize_response();
+        let (session_id, protocol_version) = match &response.payload {
+            InitializePayload::Result(r) => {
+                (Some(r.session_id.clone()), Some(r.protocol_version.clone()))
+            }
+            InitializePayload::Error(_) => (None, None),
+        };
+
+        Ok(exports::composable::mcp::client::Session::new(
+            InterceptedSession {
+                target,
+                server_url,
+                session_id,
+                protocol_version,
+            },
+        ))
+    }
+
+    fn initialize_response(&self) -> InitializeResponse {
+        self.target.initialize_response()
+    }
+
+    fn list_tools(&self, request: Option<ListToolsRequest>) -> Result<ListToolsResponse, String> {
+        let mut initial_attributes = Vec::new();
+        if let Some(ref sid) = self.session_id {
+            initial_attributes.push(kv("mcp.session.id", sid));
+        }
+        if let Some(ref pv) = self.protocol_version {
+            initial_attributes.push(kv("mcp.protocol.version", pv));
+        }
+
+        traced_call(
+            "tools/list",
+            "tools/list".to_string(),
+            &self.server_url,
+            initial_attributes,
+            |traceparent, tracestate| {
+                let mut req = request.unwrap_or(ListToolsRequest {
+                    cursor: None,
+                    meta: None,
+                });
+                let mut meta = req.meta.unwrap_or_default();
+                inject_trace_context(&mut meta, traceparent, tracestate);
+                req.meta = Some(meta);
+                self.target.list_tools(Some(&req))
+            },
+            |result, attrs| match result {
+                Ok(response) => {
+                    attrs.push(kv("jsonrpc.request.id", &response.id.to_string()));
+                    match &response.payload {
+                        ListToolsPayload::Result(_) => tracing::Status::Ok,
+                        ListToolsPayload::Error(e) => {
+                            attrs.push(kv("error.type", "protocol_error"));
+                            tracing::Status::Error(format!(
+                                "protocol error {}: {}",
+                                e.code, e.message
+                            ))
+                        }
+                    }
+                }
+                Err(err) => {
+                    attrs.push(kv("error.type", "transport_error"));
+                    tracing::Status::Error(err.clone())
+                }
+            },
+        )
+    }
+
+    fn call_tool(&self, request: CallToolRequest) -> Result<CallToolResponse, String> {
+        let name = request.name.clone();
+        let mut initial_attributes = vec![
+            kv("gen_ai.operation.name", "execute_tool"),
+            kv("gen_ai.tool.name", &name),
+        ];
+        if let Some(ref sid) = self.session_id {
+            initial_attributes.push(kv("mcp.session.id", sid));
+        }
+        if let Some(ref pv) = self.protocol_version {
+            initial_attributes.push(kv("mcp.protocol.version", pv));
+        }
+
+        traced_call(
+            "tools/call",
+            format!("tools/call {name}"),
+            &self.server_url,
+            initial_attributes,
+            |traceparent, tracestate| {
+                let mut req = request;
+                let mut meta = req.meta.unwrap_or_default();
+                inject_trace_context(&mut meta, traceparent, tracestate);
+                req.meta = Some(meta);
+                self.target.call_tool(&req)
+            },
+            |result, attrs| match result {
+                Ok(response) => {
+                    attrs.push(kv("jsonrpc.request.id", &response.id.to_string()));
+                    match &response.payload {
+                        CallToolPayload::Result(call_result) if call_result.is_error => {
+                            attrs.push(kv("error.type", "tool_error"));
+                            tracing::Status::Error("tool returned error".to_string())
+                        }
+                        CallToolPayload::Result(_) => tracing::Status::Ok,
+                        CallToolPayload::Error(e) => {
+                            attrs.push(kv("error.type", "protocol_error"));
+                            tracing::Status::Error(format!(
+                                "protocol error {}: {}",
+                                e.code, e.message
+                            ))
+                        }
+                    }
+                }
+                Err(err) => {
+                    attrs.push(kv("error.type", "transport_error"));
+                    tracing::Status::Error(err.clone())
+                }
+            },
+        )
+    }
+}
 
 const SCOPE_NAME: &str = "modulewise.composable.mcp.client";
-const SCOPE_VERSION: &str = "0.1.0";
+const SCOPE_VERSION: &str = "0.2.0";
 
 fn kv(key: &str, value: &str) -> tracing::KeyValue {
     tracing::KeyValue {
@@ -186,124 +358,4 @@ fn inject_trace_context(
     }
 }
 
-impl exports::composable::mcp::client::Guest for McpOtelInterceptor {
-    fn initialize(
-        server_url: String,
-        request: Option<InitializeRequest>,
-    ) -> Result<InitializeResult, String> {
-        traced_call(
-            "initialize",
-            "initialize".to_string(),
-            &server_url,
-            vec![kv("jsonrpc.request.id", "1")],
-            |traceparent, tracestate| {
-                let mut req = request.unwrap_or(InitializeRequest {
-                    protocol_version: None,
-                    capabilities: None,
-                    client_info: None,
-                    meta: None,
-                });
-                let mut meta = req.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                req.meta = Some(meta);
-                target::initialize(&server_url, Some(&req))
-            },
-            |result, attrs| match result {
-                Ok(init_result) => {
-                    attrs.push(kv("mcp.session.id", &init_result.session_id));
-                    attrs.push(kv("mcp.protocol.version", &init_result.protocol_version));
-                    tracing::Status::Ok
-                }
-                Err(err) => {
-                    attrs.push(kv("error.type", "transport_error"));
-                    tracing::Status::Error(err.clone())
-                }
-            },
-        )
-    }
-
-    fn list_tools(
-        server_url: String,
-        session_id: String,
-        request_id: i32,
-        request: Option<ListToolsRequest>,
-    ) -> Result<ListToolsResult, String> {
-        let initial_attributes = vec![
-            kv("jsonrpc.request.id", &request_id.to_string()),
-            kv("mcp.session.id", &session_id),
-        ];
-
-        traced_call(
-            "tools/list",
-            "tools/list".to_string(),
-            &server_url,
-            initial_attributes,
-            |traceparent, tracestate| {
-                let mut req = request.unwrap_or(ListToolsRequest {
-                    cursor: None,
-                    meta: None,
-                });
-                let mut meta = req.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                req.meta = Some(meta);
-                target::list_tools(&server_url, &session_id, request_id, Some(&req))
-            },
-            |result, attrs| match result {
-                Ok(_) => tracing::Status::Ok,
-                Err(err) => {
-                    attrs.push(kv("error.type", "transport_error"));
-                    tracing::Status::Error(err.clone())
-                }
-            },
-        )
-    }
-
-    fn call_tool(
-        server_url: String,
-        session_id: String,
-        request_id: i32,
-        request: CallToolRequest,
-    ) -> Result<CallToolResult, String> {
-        let name = request.name.clone();
-        let initial_attributes = vec![
-            kv("gen_ai.operation.name", "execute_tool"),
-            kv("gen_ai.tool.name", &name),
-            kv("jsonrpc.request.id", &request_id.to_string()),
-            kv("mcp.session.id", &session_id),
-        ];
-
-        traced_call(
-            "tools/call",
-            format!("tools/call {name}"),
-            &server_url,
-            initial_attributes,
-            |traceparent, tracestate| {
-                let mut meta = request.meta.unwrap_or_default();
-                inject_trace_context(&mut meta, traceparent, tracestate);
-                let enriched = CallToolRequest {
-                    name: request.name,
-                    arguments: request.arguments,
-                    meta: Some(meta),
-                };
-                target::call_tool(&server_url, &session_id, request_id, &enriched)
-            },
-            |result, attrs| match result {
-                Ok(tool_result) if tool_result.is_error => {
-                    attrs.push(kv("error.type", "tool_error"));
-                    tracing::Status::Error("tool returned error".to_string())
-                }
-                Ok(_) => tracing::Status::Ok,
-                Err(err) => {
-                    attrs.push(kv("error.type", "transport_error"));
-                    tracing::Status::Error(err.clone())
-                }
-            },
-        )
-    }
-
-    fn terminate(server_url: String, session_id: String) -> Result<(), String> {
-        target::terminate(&server_url, &session_id)
-    }
-}
-
-export!(McpOtelInterceptor);
+export!(Interceptor);
