@@ -132,8 +132,14 @@ impl McpMapper {
                     Some(obj.clone())
                 }
                 "array" => {
-                    // WIT list -> wrap with property name based on item type
-                    let property_name = Self::derive_array_property_name(obj);
+                    // WIT tuple -> use "tuple" (a singular composite value).
+                    // WIT list -> use a property name derived from the item
+                    // type (or "items" when no type name is available).
+                    let property_name = if obj.contains_key("prefixItems") {
+                        "tuple".to_string()
+                    } else {
+                        Self::derive_array_property_name(obj)
+                    };
                     let wrapped = json!({
                         "type": "object",
                         "properties": {
@@ -154,6 +160,11 @@ impl McpMapper {
             if let Some(ok_type) = Self::extract_result_ok_type(obj) {
                 return Self::output_schema_for_type(ok_type);
             }
+            // WIT variant -> emit as-is. The oneOf already describes a valid
+            // object shape for each variant arm.
+            if Self::is_variant_oneof(obj) {
+                return Some(obj.clone());
+            }
             // WIT option<T> -> wrap in object with nullable property
             let wrapped = json!({
                 "type": "object",
@@ -168,6 +179,24 @@ impl McpMapper {
             // Other schema types -> unstructured
             None
         }
+    }
+
+    // True if `obj`'s oneOf arms all look like variant cases: each is an
+    // object schema with a "type" property keyed on a const discriminator.
+    // Used to distinguish a WIT variant from option/result.
+    fn is_variant_oneof(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+        let Some(arms) = obj.get("oneOf").and_then(|a| a.as_array()) else {
+            return false;
+        };
+        arms.iter().all(|arm| {
+            arm.get("type").and_then(|t| t.as_str()) == Some("object")
+                && arm
+                    .get("properties")
+                    .and_then(|p| p.as_object())
+                    .and_then(|p| p.get("type"))
+                    .and_then(|t| t.get("const"))
+                    .is_some()
+        })
     }
 
     // If `obj` is `result<T, E>`, return the inner schema of the `ok` arm.
@@ -230,5 +259,171 @@ impl McpMapper {
         } else {
             format!("{singular}s")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn schema(v: Value) -> Option<rmcp::model::JsonObject> {
+        McpMapper::output_schema_for_type(&v)
+    }
+
+    #[test]
+    fn record_passes_through() {
+        let input = json!({
+            "type": "object",
+            "properties": { "x": { "type": "number" } },
+            "required": ["x"],
+            "additionalProperties": false,
+            "title": "spot"
+        });
+        let out = schema(input.clone()).unwrap();
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"]["x"]["type"], "number");
+        assert_eq!(out["title"], "spot");
+    }
+
+    #[test]
+    fn list_of_named_type_uses_plural_property() {
+        let input = json!({
+            "type": "array",
+            "items": { "type": "object", "title": "user" }
+        });
+        let out = schema(input).unwrap();
+        assert_eq!(out["type"], "object");
+        assert!(out["properties"].get("users").is_some());
+        assert_eq!(out["required"][0], "users");
+    }
+
+    #[test]
+    fn list_of_unnamed_type_falls_back_to_items() {
+        let input = json!({ "type": "array", "items": { "type": "string" } });
+        let out = schema(input).unwrap();
+        assert!(out["properties"].get("items").is_some());
+        assert_eq!(out["required"][0], "items");
+    }
+
+    #[test]
+    fn tuple_uses_tuple_property() {
+        let input = json!({
+            "type": "array",
+            "prefixItems": [{"type":"string"}, {"type":"number"}],
+            "minItems": 2,
+            "maxItems": 2
+        });
+        let out = schema(input.clone()).unwrap();
+        assert!(out["properties"].get("tuple").is_some());
+        assert_eq!(out["properties"]["tuple"], input);
+        assert_eq!(out["required"][0], "tuple");
+    }
+
+    #[test]
+    fn variant_passes_through() {
+        let input = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "type": { "const": "circle" },
+                        "value": { "type": "number" }
+                    },
+                    "required": ["type", "value"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": { "type": { "const": "square" } },
+                    "required": ["type"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        let out = schema(input.clone()).unwrap();
+        assert_eq!(out.get("oneOf"), input.get("oneOf"));
+        assert!(out.get("properties").is_none());
+    }
+
+    #[test]
+    fn option_wraps_under_result() {
+        let input = json!({
+            "oneOf": [
+                { "type": "string" },
+                { "type": "null" }
+            ]
+        });
+        let out = schema(input.clone()).unwrap();
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"]["result"], input);
+        assert_eq!(out["required"][0], "result");
+        assert_eq!(out["additionalProperties"], false);
+    }
+
+    #[test]
+    fn result_unwraps_to_ok_primitive() {
+        // result<u32, string> (ok arm is a primitive) -> unstructured
+        let input = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": { "ok": { "type": "number" } },
+                    "required": ["ok"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": { "error": { "type": "string" } },
+                    "required": ["error"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        assert!(schema(input).is_none());
+    }
+
+    #[test]
+    fn result_unwraps_to_ok_record() {
+        // result<record, string> (ok arm is a record) -> use directly
+        let input = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "ok": {
+                            "type": "object",
+                            "properties": { "id": { "type": "string" } },
+                            "required": ["id"]
+                        }
+                    },
+                    "required": ["ok"],
+                    "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": { "error": { "type": "string" } },
+                    "required": ["error"],
+                    "additionalProperties": false
+                }
+            ]
+        });
+        let out = schema(input).unwrap();
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"]["id"]["type"], "string");
+    }
+
+    #[test]
+    fn primitive_returns_none() {
+        assert!(schema(json!({ "type": "string" })).is_none());
+        assert!(schema(json!({ "type": "number" })).is_none());
+        assert!(schema(json!({ "type": "boolean" })).is_none());
+    }
+
+    #[test]
+    fn enum_returns_none() {
+        // Falls under primitive.
+        let input = json!({ "type": "string", "enum": ["red", "green", "blue"] });
+        assert!(schema(input).is_none());
     }
 }
