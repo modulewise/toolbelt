@@ -120,48 +120,80 @@ impl McpMapper {
     }
 
     fn create_output_schema(function: &Function) -> Option<rmcp::model::JsonObject> {
-        function
-            .result()
-            .and_then(|schema| schema.as_object())
-            .and_then(|obj| {
-                if let Some(schema_type) = obj.get("type").and_then(|t| t.as_str()) {
-                    match schema_type {
-                        "object" => {
-                            // WIT record -> use object schema directly
-                            Some(obj.clone())
-                        }
-                        "array" => {
-                            // WIT list -> wrap with semantic property name based on item type
-                            let property_name = Self::derive_array_property_name(obj);
-                            let wrapped = json!({
-                                "type": "object",
-                                "properties": {
-                                    property_name.clone(): obj.clone()
-                                },
-                                "required": [property_name]
-                            });
-                            Some(wrapped.as_object().unwrap().clone())
-                        }
-                        _ => {
-                            // WIT primitive -> unstructured
-                            None
-                        }
-                    }
-                } else if let Some(_option) = obj.get("oneOf").and_then(|a| a.as_array()) {
-                    // WIT option<T> -> wrap in object with nullable property
+        function.result().and_then(Self::output_schema_for_type)
+    }
+
+    fn output_schema_for_type(schema: &serde_json::Value) -> Option<rmcp::model::JsonObject> {
+        let obj = schema.as_object()?;
+        if let Some(schema_type) = obj.get("type").and_then(|t| t.as_str()) {
+            match schema_type {
+                "object" => {
+                    // WIT record -> use object schema directly
+                    Some(obj.clone())
+                }
+                "array" => {
+                    // WIT list -> wrap with property name based on item type
+                    let property_name = Self::derive_array_property_name(obj);
                     let wrapped = json!({
                         "type": "object",
                         "properties": {
-                            "result": obj.clone()
+                            property_name.clone(): obj.clone()
                         },
-                        "additionalProperties": false
+                        "required": [property_name]
                     });
                     Some(wrapped.as_object().unwrap().clone())
-                } else {
-                    // Other schema types -> unstructured
+                }
+                _ => {
+                    // WIT primitive -> unstructured
                     None
                 }
-            })
+            }
+        } else if obj.get("oneOf").and_then(|a| a.as_array()).is_some() {
+            // WIT result<T, E> -> unwrap T (the success arm). An error arm
+            // surfaces at the MCP response level via isError + text content.
+            if let Some(ok_type) = Self::extract_result_ok_type(obj) {
+                return Self::output_schema_for_type(ok_type);
+            }
+            // WIT option<T> -> wrap in object with nullable property
+            let wrapped = json!({
+                "type": "object",
+                "properties": {
+                    "result": serde_json::Value::Object(obj.clone())
+                },
+                "required": ["result"],
+                "additionalProperties": false
+            });
+            Some(wrapped.as_object().unwrap().clone())
+        } else {
+            // Other schema types -> unstructured
+            None
+        }
+    }
+
+    // If `obj` is `result<T, E>`, return the inner schema of the `ok` arm.
+    // Otherwise return None.
+    fn extract_result_ok_type(
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<&serde_json::Value> {
+        let arms = obj.get("oneOf")?.as_array()?;
+        if arms.len() != 2 {
+            return None;
+        }
+        let mut ok_inner: Option<&serde_json::Value> = None;
+        let mut has_error = false;
+        for arm in arms {
+            let props = arm.get("properties").and_then(|p| p.as_object())?;
+            if props.len() != 1 {
+                return None;
+            }
+            let (key, value) = props.iter().next()?;
+            match key.as_str() {
+                "ok" => ok_inner = Some(value),
+                "error" => has_error = true,
+                _ => return None,
+            }
+        }
+        if has_error { ok_inner } else { None }
     }
 
     fn derive_array_property_name(
